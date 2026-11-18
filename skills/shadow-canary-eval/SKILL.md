@@ -121,5 +121,5 @@ const report = runner.evaluatePromotion();
 When applying this skill to a codebase, write automated tests verifying:
 - [ ] **Shadow Crash Isolation:** When `candidate` raises an exception in `SHADOW` mode, `execute()` still returns the valid `baseline` response and records `candidate_errored=True`.
 - [ ] **Deterministic Sticky Bucketing:** Identical `request_id` strings always hash to the exact same basis-point bucket (`0..9999`) so multi-turn sessions do not flap between variants.
-- [ ] **Canary Seamless Fallback & Auto-Rollback:** Exceptions in `CANARY` mode transparently fall back to `baseline` for the active request and trip `auto_rolled_back=True` once `max_candidate_error_rate` is breached.
+- [ ] **Canary Exception Fallback & Auto-Rollback:** Exceptions in `CANARY` mode transparently fall back to `baseline` for the active request and trip `auto_rolled_back=True` once `max_candidate_error_rate` is breached.
 - [ ] **Sample Sufficiency Gate:** `evaluate_promotion()` returns `HOLD_COLLECT_MORE` (never `PROMOTE`) while `sample_count < min_samples`, and returns `ROLLBACK` if error rate, quality score, or `p95_latency_ratio` breaches policy.

@@ -4,8 +4,9 @@ __pycache__/
 *$py.class
 *.egg-info/
 .eggs/
-dist/
 build/
+*.whl
+*.tar.gz
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

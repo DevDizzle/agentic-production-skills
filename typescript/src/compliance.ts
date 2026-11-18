@@ -9,6 +9,26 @@
 
 import { canonicalJson, sha256Hex } from "./coordination.ts";
 
+function deepFreezeJson<T>(value: T): T {
+  const cloned = JSON.parse(canonicalJson(value)) as T;
+  const freezeRec = (node: unknown): void => {
+    if (node !== null && typeof node === "object") {
+      Object.freeze(node);
+      if (Array.isArray(node)) {
+        for (const item of node) {
+          freezeRec(item);
+        }
+      } else {
+        for (const val of Object.values(node as Record<string, unknown>)) {
+          freezeRec(val);
+        }
+      }
+    }
+  };
+  freezeRec(cloned);
+  return cloned;
+}
+
 // ---------------------------------------------------------------------------
 // Skill 4: Constraint Anchoring
 // ---------------------------------------------------------------------------
@@ -65,18 +85,24 @@ export class ConstraintEnvelope<
     if (params.invariants.length === 0) {
       throw new Error("ConstraintEnvelope requires at least one Invariant");
     }
-    const ordered = [...params.invariants].sort((a, b) =>
-      a.ruleId.localeCompare(b.ruleId),
+    const cloned = params.invariants.map((inv) =>
+      Object.freeze({
+        ruleId: inv.ruleId,
+        statement: inv.statement,
+        severity: inv.severity,
+        validator: inv.validator,
+      }),
     );
+    cloned.sort((a, b) => (a.ruleId < b.ruleId ? -1 : a.ruleId > b.ruleId ? 1 : 0));
     const seen = new Set<string>();
-    for (const inv of ordered) {
+    for (const inv of cloned) {
       if (seen.has(inv.ruleId)) {
         throw new Error(`Duplicate invariant ruleId: '${inv.ruleId}'`);
       }
       seen.add(inv.ruleId);
     }
     this.envelopeId = params.envelopeId;
-    this.invariants = ordered;
+    this.invariants = Object.freeze(cloned);
     this.fingerprint = this.computeFingerprint();
   }
 
@@ -96,7 +122,10 @@ export class ConstraintEnvelope<
 
   public verifyFingerprint(expectedFingerprint: string): void {
     const live = this.computeFingerprint();
-    if (live !== expectedFingerprint || this.fingerprint !== expectedFingerprint) {
+    if (
+      live !== expectedFingerprint ||
+      this.fingerprint !== expectedFingerprint
+    ) {
       throw new ConstraintTamperError(
         `Constraint envelope '${this.envelopeId}' fingerprint mismatch: expected ${expectedFingerprint}, computed ${live}`,
       );
@@ -109,8 +138,8 @@ export class ConstraintEnvelope<
     readonly compacted?: boolean;
   }): boolean {
     const everyN = params.everyNTurns ?? 4;
-    if (everyN < 1) {
-      throw new RangeError("everyNTurns must be >= 1");
+    if (!Number.isInteger(everyN) || everyN < 1) {
+      throw new RangeError("everyNTurns must be an integer >= 1");
     }
     if (params.compacted) {
       return true;
@@ -161,11 +190,24 @@ export class ConstraintEnvelope<
 // Skill 5: Independent Auditor Gate
 // ---------------------------------------------------------------------------
 
-const REASONING_BLOCK_RE =
-  /<(think|scratchpad|reasoning|internal_monologue)>[\s\S]*?<\/\1>/gi;
+const REASONING_CLOSED_RE =
+  /<(think|thought|scratchpad|reasoning|internal_monologue)(?:\s[^>]*)?>[\s\S]*?<\/\1\s*>/gi;
+
+const REASONING_UNCLOSED_RE =
+  /<(think|thought|scratchpad|reasoning|internal_monologue)(?:\s[^>]*)?>[\s\S]*$/i;
 
 export function stripReasoningTrace(rawOutput: string): string {
-  return rawOutput.replace(REASONING_BLOCK_RE, "").trim();
+  let cleaned = rawOutput;
+  while (true) {
+    REASONING_CLOSED_RE.lastIndex = 0;
+    const nextCleaned = cleaned.replace(REASONING_CLOSED_RE, "");
+    if (nextCleaned === cleaned) {
+      break;
+    }
+    cleaned = nextCleaned;
+  }
+  cleaned = cleaned.replace(REASONING_UNCLOSED_RE, "");
+  return cleaned.trim();
 }
 
 export interface AuditCriterion {
@@ -227,9 +269,9 @@ export class IndependentAuditorGate {
     readonly rawCandidateOutput: string;
     readonly evidence?: Readonly<Record<string, unknown>>;
   }): AuditVerdict {
-    const evidence: Readonly<Record<string, unknown>> = {
-      ...(params.evidence ?? {}),
-    };
+    const evidence: Readonly<Record<string, unknown>> = params.evidence
+      ? deepFreezeJson(params.evidence)
+      : Object.freeze({});
     const isolatedOutput = stripReasoningTrace(params.rawCandidateOutput);
 
     const detFailedIds: string[] = [];
@@ -255,25 +297,37 @@ export class IndependentAuditorGate {
       };
     }
 
-    const packet: AuditPacket = {
+    const packet: AuditPacket = Object.freeze({
       specification: params.specification,
       candidateOutput: isolatedOutput,
-      criteria: this.criteria.map((c) => ({
-        criterionId: c.criterionId,
-        description: c.description,
-      })),
+      criteria: Object.freeze(
+        this.criteria.map((c) =>
+          Object.freeze({
+            criterionId: c.criterionId,
+            description: c.description,
+          }),
+        ),
+      ),
       evidence,
-    };
+    });
 
     const failedIds: string[] = [];
     const findings: string[] = [];
     const remediations: string[] = [];
     const auditorLabels: string[] = [];
+    let anyRejected = false;
 
     for (const auditor of this.auditors) {
       auditorLabels.push(auditor.auditorId);
       const verdict = auditor.evaluate(packet);
       if (!verdict.approved) {
+        anyRejected = true;
+      }
+      if (
+        !verdict.approved ||
+        verdict.failedCriteria.length > 0 ||
+        verdict.findings.length > 0
+      ) {
         for (const cid of verdict.failedCriteria) {
           if (!failedIds.includes(cid)) {
             failedIds.push(cid);
@@ -288,11 +342,14 @@ export class IndependentAuditorGate {
       }
     }
 
-    const approved = failedIds.length === 0 && findings.length === 0;
+    const approved =
+      !anyRejected && failedIds.length === 0 && findings.length === 0;
     return {
       approved,
       auditorId:
-        auditorLabels.length > 0 ? auditorLabels.join("+") : "deterministic_only",
+        auditorLabels.length > 0
+          ? auditorLabels.join("+")
+          : "deterministic_only",
       failedCriteria: failedIds,
       findings,
       remediation: remediations.join(" | "),
@@ -309,15 +366,17 @@ export class IndependentAuditorGate {
     readonly maxRevisions?: number;
   }): GuardedGenerationResult {
     const maxRevisions = params.maxRevisions ?? 2;
-    if (maxRevisions < 0) {
-      throw new RangeError("maxRevisions must be >= 0");
+    if (!Number.isInteger(maxRevisions) || maxRevisions < 0) {
+      throw new RangeError("maxRevisions must be an integer >= 0");
     }
 
     const verdicts: AuditVerdict[] = [];
     let latestClean = "";
 
     for (let attempt = 0; attempt <= maxRevisions; attempt++) {
-      const rawCandidate = params.generator(params.specification, [...verdicts]);
+      const rawCandidate = params.generator(params.specification, [
+        ...verdicts,
+      ]);
       latestClean = stripReasoningTrace(rawCandidate);
       const verdict = this.evaluate({
         specification: params.specification,
@@ -424,14 +483,13 @@ export class CausalAuditLedger {
     readonly entryId?: string;
   }): LedgerEntry {
     const seq = this.ledgerEntries.length;
-    const resolvedId =
-      params.entryId ?? `evt-${String(seq).padStart(6, "0")}`;
+    const resolvedId = params.entryId ?? `evt-${String(seq).padStart(6, "0")}`;
 
     if (this.indexById.has(resolvedId)) {
       throw new LedgerIntegrityError(`Duplicate entryId: '${resolvedId}'`);
     }
 
-    const dedupParents = [...new Set(params.parentIds ?? [])];
+    const dedupParents = Object.freeze([...new Set(params.parentIds ?? [])]);
     for (const pid of dedupParents) {
       if (!this.indexById.has(pid)) {
         throw new LedgerIntegrityError(
@@ -445,9 +503,9 @@ export class CausalAuditLedger {
       ? lastEntry.entryHash
       : CausalAuditLedger.GENESIS_HASH;
     const payloadDigest = sha256Hex(canonicalJson(params.payload));
-    const metadata: Readonly<Record<string, unknown>> = {
-      ...(params.metadata ?? {}),
-    };
+    const frozenMetadata: Readonly<Record<string, unknown>> = params.metadata
+      ? deepFreezeJson(params.metadata)
+      : Object.freeze({});
     const timestampMs = this.clock();
 
     const entryHash = CausalAuditLedger.computeEntryHash({
@@ -458,11 +516,11 @@ export class CausalAuditLedger {
       eventType: params.eventType,
       parentIds: dedupParents,
       payloadDigest,
-      metadata,
+      metadata: frozenMetadata,
       prevHash,
     });
 
-    const entry: LedgerEntry = {
+    const entry: LedgerEntry = Object.freeze({
       seq,
       entryId: resolvedId,
       timestampMs,
@@ -470,10 +528,10 @@ export class CausalAuditLedger {
       eventType: params.eventType,
       parentIds: dedupParents,
       payloadDigest,
-      metadata,
+      metadata: frozenMetadata,
       prevHash,
       entryHash,
-    };
+    });
 
     this.ledgerEntries.push(entry);
     this.indexById.set(resolvedId, seq);
@@ -576,7 +634,8 @@ export class CausalAuditLedger {
       }
       visited.add(pid);
       const pIdx = this.indexById.get(pid);
-      const parentEntry = pIdx !== undefined ? this.ledgerEntries[pIdx] : undefined;
+      const parentEntry =
+        pIdx !== undefined ? this.ledgerEntries[pIdx] : undefined;
       if (parentEntry) {
         for (const grandPid of parentEntry.parentIds) {
           if (!visited.has(grandPid)) {

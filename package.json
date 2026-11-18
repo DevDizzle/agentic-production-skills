@@ -13,20 +13,42 @@
     "type": "git",
     "url": "https://github.com/DevDizzle/agentic-production-skills.git"
   },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "typescript/src",
+    "skills",
+    "plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
-    ".": "./typescript/src/index.ts",
-    "./coordination": "./typescript/src/coordination.ts",
-    "./compliance": "./typescript/src/compliance.ts",
-    "./resilience": "./typescript/src/resilience.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./coordination": {
+      "types": "./dist/coordination.d.ts",
+      "default": "./dist/coordination.js"
+    },
+    "./compliance": {
+      "types": "./dist/compliance.d.ts",
+      "default": "./dist/compliance.js"
+    },
+    "./resilience": {
+      "types": "./dist/resilience.d.ts",
+      "default": "./dist/resilience.js"
+    }
   },
   "engines": {
     "node": ">=22.6.0"
   },
   "scripts": {
     "test": "npm run test:py && npm run test:ts",
-    "test:ts": "node --test tests/typescript/patterns.test.ts",
+    "test:ts": "node --experimental-strip-types --test tests/typescript/patterns.test.ts",
     "test:py": "PYTHONPATH=python python3 -m unittest discover -s tests/python -v",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "npx --yes -p typescript@5.8.2 tsc -p tsconfig.json",
+    "build": "npx --yes -p typescript@5.8.2 tsc -p tsconfig.build.json"
   },
   "keywords": [
     "ai-agents",

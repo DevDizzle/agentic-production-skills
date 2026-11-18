@@ -10,14 +10,39 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    name: Python 3.12 & Strict TypeScript Suite
+  python:
+    name: Python ${{ matrix.python-version }} Suite
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Python package and verify PEP 561 marker
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+          python -c "import importlib.resources, agentic_patterns; assert importlib.resources.files(agentic_patterns).joinpath('py.typed').is_file()"
+
+      - name: Run Python unit tests against installed package
+        run: python -m unittest discover -s tests/python -v
+
+  typescript:
+    name: Node 24 & Strict TypeScript Suite
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.12 (for combined npm test)
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -27,11 +52,13 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Run Python 3.12 unit tests
-        run: npm run test:py
+      - name: Run strict TypeScript typecheck
+        run: npm run typecheck
 
-      - name: Run TypeScript strict typecheck
-        run: npx --yes -p typescript@5.8.2 tsc -p tsconfig.json
+      - name: Build dist/ and verify committed artifacts are up to date
+        run: |
+          npm run build
+          git diff --exit-code dist/
 
-      - name: Run Node native TypeScript unit tests
-        run: node --experimental-strip-types --test tests/typescript/patterns.test.ts
+      - name: Run full test suite (Python + Node TypeScript)
+        run: npm test

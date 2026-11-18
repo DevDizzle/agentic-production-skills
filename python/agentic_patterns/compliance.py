@@ -9,20 +9,14 @@ Implements Skills 4-6:
 from __future__ import annotations
 
 from collections import deque
+import copy
 from dataclasses import dataclass
-import hashlib
-import json
 import re
 import time
+from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
-
-def _canonical_json(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
-
-
-def _sha256_hex(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+from .coordination import canonical_json, sha256_hex
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +102,8 @@ class ConstraintEnvelope:
             }
             for inv in self._invariants
         ]
-        return _sha256_hex(
-            _canonical_json(
+        return sha256_hex(
+            canonical_json(
                 {
                     "envelope_id": self._envelope_id,
                     "rules": canonical_spec,
@@ -132,7 +126,7 @@ class ConstraintEnvelope:
         every_n_turns: int = 4,
         compacted: bool = False,
     ) -> bool:
-        if every_n_turns < 1:
+        if isinstance(every_n_turns, bool) or every_n_turns < 1:
             raise ValueError("every_n_turns must be >= 1")
         if compacted:
             return True
@@ -179,15 +173,26 @@ class ConstraintEnvelope:
 # Skill 5: Independent Auditor Gate
 # ---------------------------------------------------------------------------
 
-_REASONING_BLOCK_RE = re.compile(
-    r"<(think|scratchpad|reasoning|internal_monologue)>.*?</\1>",
+_REASONING_CLOSED_RE = re.compile(
+    r"<(think|thought|scratchpad|reasoning|internal_monologue)(?:\s[^>]*)?>.*?</\1\s*>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+_REASONING_UNCLOSED_RE = re.compile(
+    r"<(think|thought|scratchpad|reasoning|internal_monologue)(?:\s[^>]*)?>.*$",
     flags=re.IGNORECASE | re.DOTALL,
 )
 
 
 def strip_reasoning_trace(raw_output: str) -> str:
-    """Strips generator chain-of-thought tags so auditors evaluate only the artifact."""
-    cleaned = _REASONING_BLOCK_RE.sub("", raw_output)
+    """Strips generator chain-of-thought tags (including attributes and truncated blocks)."""
+    cleaned = raw_output
+    while True:
+        next_cleaned = _REASONING_CLOSED_RE.sub("", cleaned)
+        if next_cleaned == cleaned:
+            break
+        cleaned = next_cleaned
+    cleaned = _REASONING_UNCLOSED_RE.sub("", cleaned)
     return cleaned.strip()
 
 
@@ -257,7 +262,11 @@ class IndependentAuditorGate:
         raw_candidate_output: str,
         evidence: Mapping[str, object] | None = None,
     ) -> AuditVerdict:
-        ev: Mapping[str, object] = dict(evidence) if evidence is not None else {}
+        ev: Mapping[str, object] = (
+            MappingProxyType(copy.deepcopy(dict(evidence)))
+            if evidence is not None
+            else MappingProxyType({})
+        )
         isolated_output = strip_reasoning_trace(raw_candidate_output)
 
         det_failed_ids: list[str] = []
@@ -290,11 +299,14 @@ class IndependentAuditorGate:
         findings: list[str] = []
         remediations: list[str] = []
         auditor_labels: list[str] = []
+        any_rejected = False
 
         for auditor_id, auditor_fn in self._auditors:
             auditor_labels.append(auditor_id)
             verdict = auditor_fn(packet)
             if not verdict.approved:
+                any_rejected = True
+            if not verdict.approved or verdict.failed_criteria or verdict.findings:
                 for cid in verdict.failed_criteria:
                     if cid not in failed_ids:
                         failed_ids.append(cid)
@@ -302,7 +314,7 @@ class IndependentAuditorGate:
                 if verdict.remediation:
                     remediations.append(verdict.remediation)
 
-        approved = len(failed_ids) == 0 and len(findings) == 0
+        approved = (not any_rejected) and len(failed_ids) == 0 and len(findings) == 0
         return AuditVerdict(
             approved=approved,
             auditor_id="+".join(auditor_labels) if auditor_labels else "deterministic_only",
@@ -319,7 +331,7 @@ class IndependentAuditorGate:
         evidence: Mapping[str, object] | None = None,
         max_revisions: int = 2,
     ) -> GuardedGenerationResult:
-        if max_revisions < 0:
+        if isinstance(max_revisions, bool) or max_revisions < 0:
             raise ValueError("max_revisions must be >= 0")
         verdicts: list[AuditVerdict] = []
         latest_clean = ""
@@ -422,7 +434,7 @@ class CausalAuditLedger:
             "seq": seq,
             "timestamp_ms": timestamp_ms,
         }
-        return _sha256_hex(_canonical_json(body))
+        return sha256_hex(canonical_json(body))
 
     def append(
         self,
@@ -447,8 +459,10 @@ class CausalAuditLedger:
                 )
 
         prev_hash = self._entries[-1].entry_hash if self._entries else self.GENESIS_HASH
-        payload_digest = _sha256_hex(_canonical_json(payload))
-        meta_copy: dict[str, object] = dict(metadata) if metadata is not None else {}
+        payload_digest = sha256_hex(canonical_json(payload))
+        meta_copy: dict[str, object] = (
+            copy.deepcopy(dict(metadata)) if metadata is not None else {}
+        )
         ts = self._clock()
 
         entry_hash = self._compute_entry_hash(
@@ -470,7 +484,7 @@ class CausalAuditLedger:
             event_type=event_type,
             parent_ids=dedup_parents,
             payload_digest=payload_digest,
-            metadata=meta_copy,
+            metadata=MappingProxyType(meta_copy),
             prev_hash=prev_hash,
             entry_hash=entry_hash,
         )
@@ -482,7 +496,7 @@ class CausalAuditLedger:
         if entry_id not in self._index_by_id:
             raise KeyError(f"Unknown entry_id: '{entry_id}'")
         entry = self._entries[self._index_by_id[entry_id]]
-        return entry.payload_digest == _sha256_hex(_canonical_json(candidate_payload))
+        return entry.payload_digest == sha256_hex(canonical_json(candidate_payload))
 
     def verify_chain(self) -> ChainVerificationResult:
         expected_prev = self.GENESIS_HASH

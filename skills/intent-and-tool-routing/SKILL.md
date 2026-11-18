@@ -14,7 +14,7 @@ description: >-
 Exposing an entire tool catalog to a single generalist prompt degrades production agent systems in three predictable ways:
 
 1. **Schema Token Bloat and Selection Drift:** Injecting 25 to 60 JSON tool schemas into every turn consumes thousands of input tokens per step and lowers tool-choice accuracy when parameter names overlap across domains (for example, `get_account` in billing vs. `get_account` in identity).
-2. **Uncalibrated RoutingGuesses:** Pure LLM routers forced to pick a specialist route without a minimum confidence floor silently guess on ambiguous prompts instead of routing to a safe clarification or triage handler.
+2. **Uncalibrated Routing Guesses:** Pure LLM routers forced to pick a specialist route without a minimum confidence floor silently guess on ambiguous prompts instead of routing to a safe clarification or triage handler.
 3. **Prompt-Only Tool Filtering:** Filtering tool definitions only in the prompt leaves the execution dispatcher wide open. If an indirect prompt injection convinces the model to emit a tool call for a hidden administrative tool name (`rotate_api_key`), an unscoped executor runs it anyway.
 
 ## 2. When to Use vs. When NOT to Use

@@ -42,3 +42,6 @@ Issues = "https://github.com/DevDizzle/agentic-production-skills/issues"
 [tool.setuptools.packages.find]
 where = ["python"]
 include = ["agentic_patterns*"]
+
+[tool.setuptools.package-data]
+agentic_patterns = ["py.typed"]

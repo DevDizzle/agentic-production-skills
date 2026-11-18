@@ -12,31 +12,60 @@
 // ---------------------------------------------------------------------------
 
 export function canonicalJson(value: unknown): string {
-  if (value === null || value === undefined) {
+  if (value === null) {
     return "null";
   }
-  if (typeof value === "boolean" || typeof value === "number") {
-    return JSON.stringify(value);
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new RangeError(
+        "Non-finite number (NaN or Infinity) is not permitted in canonical JSON",
+      );
+    }
+    return Object.is(value, -0) ? "0" : JSON.stringify(value);
   }
   if (typeof value === "string") {
     return JSON.stringify(value);
   }
   if (Array.isArray(value)) {
-    return "[" + value.map((item) => canonicalJson(item)).join(",") + "]";
+    const items = value.map((item) => {
+      if (item === undefined) {
+        throw new TypeError(
+          "Undefined array element is not permitted in canonical JSON",
+        );
+      }
+      return canonicalJson(item);
+    });
+    return "[" + items.join(",") + "]";
   }
   if (typeof value === "object") {
+    const proto: unknown = Object.getPrototypeOf(value);
+    if (proto !== null && proto !== Object.prototype) {
+      throw new TypeError(
+        "Non-plain object (such as Date, Map, Set, or class instance) is not permitted in canonical JSON",
+      );
+    }
     const record = value as Record<string, unknown>;
-    const keys = Object.keys(record).sort();
+    const keys = Object.keys(record).sort((a, b) =>
+      a < b ? -1 : a > b ? 1 : 0,
+    );
     const parts: string[] = [];
     for (const key of keys) {
       const prop = record[key];
-      if (prop !== undefined) {
-        parts.push(`${JSON.stringify(key)}:${canonicalJson(prop)}`);
+      if (prop === undefined) {
+        throw new TypeError(
+          `Undefined object property '${key}' is not permitted in canonical JSON`,
+        );
       }
+      parts.push(`${JSON.stringify(key)}:${canonicalJson(prop)}`);
     }
     return "{" + parts.join(",") + "}";
   }
-  return JSON.stringify(String(value));
+  throw new TypeError(
+    `Unsupported type '${typeof value}' is not permitted in canonical JSON`,
+  );
 }
 
 export function utf8Bytes(input: string): Uint8Array {
@@ -92,7 +121,7 @@ function rotr(value: number, shift: number): number {
 
 export function sha256Bytes(data: Uint8Array): string {
   const bitLen = data.length * 8;
-  const totalLen = (((data.length + 9 + 63) >> 6) << 6);
+  const totalLen = ((data.length + 9 + 63) >> 6) << 6;
   const padded = new Uint8Array(totalLen);
   padded.set(data);
   padded[data.length] = 0x80;
@@ -180,27 +209,35 @@ export function sha256Hex(text: string): string {
 // Skill 1: Intent and Tool Routing
 // ---------------------------------------------------------------------------
 
+export type ToolViolationReason = "intent_not_allowed" | "read_only_required";
+
 export class ToolScopeViolationError extends Error {
   public readonly activeIntent: string;
   public readonly toolName: string;
   public readonly allowedIntents: readonly string[];
+  public readonly reason: ToolViolationReason;
 
   public constructor(params: {
     activeIntent: string;
     toolName: string;
     allowedIntents: readonly string[];
+    reason?: ToolViolationReason;
   }) {
+    const reason = params.reason ?? "intent_not_allowed";
     const allowed =
       params.allowedIntents.length > 0
         ? [...params.allowedIntents].sort().join(", ")
         : "<none>";
-    super(
-      `Tool '${params.toolName}' is not permitted for intent '${params.activeIntent}' (allowed intents: ${allowed}).`,
-    );
+    const message =
+      reason === "read_only_required"
+        ? `Tool '${params.toolName}' is mutating (readOnly=false) and cannot execute when read-only mode is required (active intent: '${params.activeIntent}').`
+        : `Tool '${params.toolName}' is not permitted for intent '${params.activeIntent}' (allowed intents: ${allowed}).`;
+    super(message);
     this.name = "ToolScopeViolationError";
     this.activeIntent = params.activeIntent;
     this.toolName = params.toolName;
-    this.allowedIntents = [...params.allowedIntents];
+    this.allowedIntents = Object.freeze([...params.allowedIntents]);
+    this.reason = reason;
   }
 }
 
@@ -246,8 +283,14 @@ export class IntentRouter {
 
   public constructor(options: IntentRouterOptions = {}) {
     const minConfidence = options.minConfidence ?? 0.75;
-    if (minConfidence < 0 || minConfidence > 1) {
-      throw new RangeError("minConfidence must be between 0.0 and 1.0");
+    if (
+      !Number.isFinite(minConfidence) ||
+      minConfidence < 0 ||
+      minConfidence > 1
+    ) {
+      throw new RangeError(
+        "minConfidence must be a finite number between 0.0 and 1.0",
+      );
     }
     this.rules = [...(options.rules ?? [])].sort(
       (a, b) => (b.priority ?? 0) - (a.priority ?? 0),
@@ -282,13 +325,17 @@ export class IntentRouter {
         };
       }
       for (const kw of rule.keywords ?? []) {
-        const pattern = new RegExp(`\\b${escapeRegExp(kw.toLowerCase())}\\b`);
+        const kwClean = kw.trim().toLowerCase();
+        if (kwClean.length === 0) {
+          continue;
+        }
+        const pattern = new RegExp(`(?<!\\w)${escapeRegExp(kwClean)}(?!\\w)`);
         if (pattern.test(lowered)) {
           return {
             intent: rule.intent,
             confidence: 1.0,
             matchedBy: "rule",
-            reason: `keyword:${kw.toLowerCase()}`,
+            reason: `keyword:${kwClean}`,
           };
         }
       }
@@ -296,7 +343,9 @@ export class IntentRouter {
 
     if (this.classifier) {
       const classified = this.classifier(normalized);
-      const confidence = Math.max(0, Math.min(1, classified.confidence));
+      const confidence = Number.isFinite(classified.confidence)
+        ? Math.max(0, Math.min(1, classified.confidence))
+        : 0;
       if (this.knownIntents && !this.knownIntents.has(classified.intent)) {
         return {
           intent: this.fallbackIntent,
@@ -371,11 +420,11 @@ export class ScopedToolRegistry {
     });
   }
 
-  public exportManifest(
+  public toolsForIntent(
     intent: string,
     options: { readonly readOnlyOnly?: boolean } = {},
-  ): ToolManifestEntry[] {
-    const entries: ToolManifestEntry[] = [];
+  ): ToolSpec<unknown, unknown>[] {
+    const scoped: ToolSpec<unknown, unknown>[] = [];
     for (const spec of this.tools.values()) {
       if (!spec.allowedIntents.has(intent)) {
         continue;
@@ -383,13 +432,28 @@ export class ScopedToolRegistry {
       if (options.readOnlyOnly && !spec.readOnly) {
         continue;
       }
-      entries.push({
-        name: spec.name,
-        description: spec.description,
-        readOnly: spec.readOnly,
-      });
+      scoped.push(
+        Object.freeze({
+          name: spec.name,
+          description: spec.description,
+          allowedIntents: Object.freeze([...spec.allowedIntents]),
+          readOnly: spec.readOnly,
+          handler: spec.handler,
+        }),
+      );
     }
-    return entries;
+    return scoped;
+  }
+
+  public exportManifest(
+    intent: string,
+    options: { readonly readOnlyOnly?: boolean } = {},
+  ): ToolManifestEntry[] {
+    return this.toolsForIntent(intent, options).map((spec) => ({
+      name: spec.name,
+      description: spec.description,
+      readOnly: spec.readOnly ?? true,
+    }));
   }
 
   public invoke<TOut = unknown>(params: {
@@ -407,13 +471,15 @@ export class ScopedToolRegistry {
         activeIntent: params.activeIntent,
         toolName: params.toolName,
         allowedIntents: [...spec.allowedIntents],
+        reason: "intent_not_allowed",
       });
     }
     if (params.requireReadOnly && !spec.readOnly) {
       throw new ToolScopeViolationError({
         activeIntent: params.activeIntent,
         toolName: params.toolName,
-        allowedIntents: [],
+        allowedIntents: [...spec.allowedIntents],
+        reason: "read_only_required",
       });
     }
     return spec.handler(params.payload) as TOut;
@@ -445,12 +511,14 @@ export class DelegationDeniedError extends Error {
     lineage: readonly string[];
     detail: string;
   }) {
-    super(`[${params.reason}] ${params.caller} -> ${params.worker}: ${params.detail}`);
+    super(
+      `[${params.reason}] ${params.caller} -> ${params.worker}: ${params.detail}`,
+    );
     this.name = "DelegationDeniedError";
     this.reason = params.reason;
     this.caller = params.caller;
     this.worker = params.worker;
-    this.lineage = [...params.lineage];
+    this.lineage = Object.freeze([...params.lineage]);
   }
 }
 
@@ -496,14 +564,27 @@ export class SupervisorGate {
   private readonly recordedReceipts: DelegationReceipt<unknown>[] = [];
 
   public constructor(policy: DelegationPolicy) {
+    const maxDepth = policy.maxDepth ?? 3;
+    const maxTotalDelegations = policy.maxTotalDelegations ?? 10;
+    const maxCallsPerWorker = policy.maxCallsPerWorker ?? 3;
+    if (!Number.isInteger(maxDepth) || maxDepth < 1) {
+      throw new RangeError("maxDepth must be an integer >= 1");
+    }
+    if (!Number.isInteger(maxTotalDelegations) || maxTotalDelegations < 1) {
+      throw new RangeError("maxTotalDelegations must be an integer >= 1");
+    }
+    if (!Number.isInteger(maxCallsPerWorker) || maxCallsPerWorker < 1) {
+      throw new RangeError("maxCallsPerWorker must be an integer >= 1");
+    }
+
     const map = new Map<string, ReadonlySet<string>>();
     for (const [caller, targets] of Object.entries(policy.allowedTransitions)) {
       map.set(caller, new Set(targets));
     }
     this.allowedTransitions = map;
-    this.maxDepth = policy.maxDepth ?? 3;
-    this.maxTotalDelegations = policy.maxTotalDelegations ?? 10;
-    this.maxCallsPerWorker = policy.maxCallsPerWorker ?? 3;
+    this.maxDepth = maxDepth;
+    this.maxTotalDelegations = maxTotalDelegations;
+    this.maxCallsPerWorker = maxCallsPerWorker;
     this.preventCycles = policy.preventCycles ?? true;
   }
 
@@ -531,7 +612,9 @@ export class SupervisorGate {
     task: DelegationTask<TPayload>,
   ): DelegationReceipt<TResult> {
     const baseLineage =
-      task.lineage && task.lineage.length > 0 ? [...task.lineage] : [task.caller];
+      task.lineage && task.lineage.length > 0
+        ? [...task.lineage]
+        : [task.caller];
     if (baseLineage[baseLineage.length - 1] !== task.caller) {
       baseLineage.push(task.caller);
     }
@@ -604,7 +687,7 @@ export class SupervisorGate {
     const seq = this.totalDelegations;
     this.workerCounts.set(task.worker, usedCalls + 1);
 
-    const nextLineage = [...baseLineage, task.worker];
+    const nextLineage = Object.freeze([...baseLineage, task.worker]);
     const forwardedTask: DelegationTask<unknown> = {
       taskId: task.taskId,
       caller: task.caller,
@@ -615,7 +698,7 @@ export class SupervisorGate {
     };
 
     const output = handler(forwardedTask) as TResult;
-    const receipt: DelegationReceipt<TResult> = {
+    const receipt: DelegationReceipt<TResult> = Object.freeze({
       taskId: task.taskId,
       caller: task.caller,
       worker: task.worker,
@@ -623,7 +706,7 @@ export class SupervisorGate {
       sequenceNum: seq,
       lineage: nextLineage,
       output,
-    };
+    });
     this.recordedReceipts.push(receipt);
     return receipt;
   }
@@ -696,13 +779,15 @@ export class PassByRefBlackboard {
   private readonly records = new Map<string, StoredArtifact>();
   private readonly versionsByKey = new Map<string, number>();
 
-  public constructor(options: {
-    readonly maxSummaryChars?: number;
-    readonly clock?: () => number;
-  } = {}) {
+  public constructor(
+    options: {
+      readonly maxSummaryChars?: number;
+      readonly clock?: () => number;
+    } = {},
+  ) {
     const maxSummaryChars = options.maxSummaryChars ?? 240;
-    if (maxSummaryChars < 16) {
-      throw new RangeError("maxSummaryChars must be >= 16");
+    if (!Number.isInteger(maxSummaryChars) || maxSummaryChars < 16) {
+      throw new RangeError("maxSummaryChars must be an integer >= 16");
     }
     this.maxSummaryChars = maxSummaryChars;
     this.clock = options.clock ?? (() => Date.now());
@@ -720,6 +805,12 @@ export class PassByRefBlackboard {
     if (params.key.trim().length === 0) {
       throw new Error("Artifact key must be non-empty");
     }
+    if (
+      params.ttlMs !== undefined &&
+      (!Number.isFinite(params.ttlMs) || params.ttlMs <= 0)
+    ) {
+      throw new RangeError("ttlMs must be a finite positive number when provided");
+    }
     const serialized = canonicalJson(params.value);
     const bytes = utf8Bytes(serialized);
     const digest = sha256Bytes(bytes);
@@ -736,7 +827,7 @@ export class PassByRefBlackboard {
       params.ttlMs !== undefined ? nowMs + params.ttlMs : null;
     const refId = `ref:${params.key}:v${version}:${digest.slice(0, 12)}`;
 
-    const pointer: ArtifactPointer = {
+    const pointer: ArtifactPointer = Object.freeze({
       refId,
       key: params.key,
       kind: params.kind,
@@ -757,7 +848,7 @@ export class PassByRefBlackboard {
           summary: cleanSummary,
         };
       },
-    };
+    });
 
     this.records.set(refId, {
       pointer,

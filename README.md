@@ -279,10 +279,13 @@ if (decision.canExecuteNow) {
 PYTHONPATH=python python3 -m unittest discover -s tests/python -v
 
 # 2. Native Node TypeScript test suite
-node --test tests/typescript/patterns.test.ts
+node --experimental-strip-types --test tests/typescript/patterns.test.ts
 
 # 3. Strict TypeScript compiler check (strict: true, noImplicitAny: true, zero any)
 npm run typecheck
+
+# 4. Emit compiled ESM + .d.ts package artifacts into dist/
+npm run build
 ```
 
 ---
@@ -291,12 +294,14 @@ npm run typecheck
 
 ```text
 agentic-production-skills/
+├── .github/workflows/ci.yml           # Python 3.11/3.12 + Node 24 strict CI matrix
 ├── README.md
 ├── LICENSE
 ├── plugin.json
 ├── pyproject.toml
 ├── package.json
 ├── tsconfig.json
+├── tsconfig.build.json
 ├── skills/                            # 12 installable SKILL.md definitions
 │   ├── intent-and-tool-routing/SKILL.md
 │   ├── supervisor-delegation-gate/SKILL.md
@@ -312,17 +317,24 @@ agentic-production-skills/
 │   └── shadow-canary-eval/SKILL.md
 ├── python/agentic_patterns/           # Zero-dependency Python 3.11+ implementation
 │   ├── __init__.py
+│   ├── py.typed
 │   ├── coordination.py
 │   ├── compliance.py
 │   └── resilience.py
-├── typescript/src/                    # Zero-dependency strict TypeScript implementation
+├── typescript/src/                    # Zero-dependency strict TypeScript source
 │   ├── index.ts
 │   ├── coordination.ts
 │   ├── compliance.ts
 │   └── resilience.ts
+├── dist/                              # Prebuilt ESM (.js) + declarations (.d.ts)
+│   ├── index.js / index.d.ts
+│   ├── coordination.js / coordination.d.ts
+│   ├── compliance.js / compliance.d.ts
+│   └── resilience.js / resilience.d.ts
 └── tests/
     ├── python/test_patterns.py
-    └── typescript/patterns.test.ts
+    ├── typescript/patterns.test.ts
+    └── typescript/node-shim.d.ts
 ```
 
 ---

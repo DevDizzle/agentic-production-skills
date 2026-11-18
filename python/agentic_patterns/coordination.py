@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import json
+import math
 import re
 import time
 from typing import Callable, Generic, Mapping, Sequence, TypeVar
@@ -22,13 +23,29 @@ TPayload = TypeVar("TPayload")
 TResult = TypeVar("TResult")
 
 
+def canonical_json(value: object) -> str:
+    """Serializes JSON-compatible data deterministically across Python and TypeScript."""
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def sha256_hex(text: str) -> str:
+    """Computes lowercase SHA-256 hex digest over UTF-8 bytes."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Skill 1: Intent and Tool Routing
 # ---------------------------------------------------------------------------
 
 
 class ToolScopeViolationError(PermissionError):
-    """Raised when an agent attempts to invoke a tool outside the active intent scope."""
+    """Raised when an agent attempts to invoke a tool outside intent or read-only scope."""
 
     def __init__(
         self,
@@ -36,15 +53,24 @@ class ToolScopeViolationError(PermissionError):
         active_intent: str,
         tool_name: str,
         allowed_intents: frozenset[str],
+        reason: str = "intent_not_allowed",
     ) -> None:
         self.active_intent = active_intent
         self.tool_name = tool_name
         self.allowed_intents = allowed_intents
+        self.reason = reason
         allowed = ", ".join(sorted(allowed_intents)) or "<none>"
-        super().__init__(
-            f"Tool '{tool_name}' is not permitted for intent '{active_intent}' "
-            f"(allowed intents: {allowed})."
-        )
+        if reason == "read_only_required":
+            msg = (
+                f"Tool '{tool_name}' is mutating (read_only=False) and cannot execute "
+                f"when read-only mode is required (active intent: '{active_intent}')."
+            )
+        else:
+            msg = (
+                f"Tool '{tool_name}' is not permitted for intent '{active_intent}' "
+                f"(allowed intents: {allowed})."
+            )
+        super().__init__(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,11 +108,15 @@ class IntentRouter:
         fallback_intent: str = "triage",
         known_intents: set[str] | frozenset[str] | None = None,
     ) -> None:
-        if not 0.0 <= min_confidence <= 1.0:
-            raise ValueError("min_confidence must be between 0.0 and 1.0")
+        if (
+            isinstance(min_confidence, bool)
+            or not math.isfinite(min_confidence)
+            or not 0.0 <= min_confidence <= 1.0
+        ):
+            raise ValueError("min_confidence must be a finite float between 0.0 and 1.0")
         self._rules = tuple(sorted(rules, key=lambda r: r.priority, reverse=True))
         self._classifier = classifier
-        self._min_confidence = min_confidence
+        self._min_confidence = float(min_confidence)
         self._fallback_intent = fallback_intent
         self._known_intents = frozenset(known_intents) if known_intents is not None else None
 
@@ -110,18 +140,26 @@ class IntentRouter:
                     reason=f"predicate:{rule.intent}",
                 )
             for kw in rule.keywords:
-                pattern = r"\b" + re.escape(kw.lower()) + r"\b"
+                kw_clean = kw.strip().lower()
+                if not kw_clean:
+                    continue
+                pattern = r"(?<!\w)" + re.escape(kw_clean) + r"(?!\w)"
                 if re.search(pattern, lowered):
                     return IntentDecision(
                         intent=rule.intent,
                         confidence=1.0,
                         matched_by="rule",
-                        reason=f"keyword:{kw.lower()}",
+                        reason=f"keyword:{kw_clean}",
                     )
 
         if self._classifier is not None:
             candidate_intent, raw_confidence = self._classifier(normalized)
-            confidence = max(0.0, min(1.0, float(raw_confidence)))
+            raw_float = float(raw_confidence)
+            confidence = (
+                max(0.0, min(1.0, raw_float))
+                if math.isfinite(raw_float)
+                else 0.0
+            )
             if (
                 self._known_intents is not None
                 and candidate_intent not in self._known_intents
@@ -224,12 +262,14 @@ class ScopedToolRegistry:
                 active_intent=active_intent,
                 tool_name=tool_name,
                 allowed_intents=spec.allowed_intents,
+                reason="intent_not_allowed",
             )
         if require_read_only and not spec.read_only:
             raise ToolScopeViolationError(
                 active_intent=active_intent,
                 tool_name=tool_name,
-                allowed_intents=frozenset(),
+                allowed_intents=spec.allowed_intents,
+                reason="read_only_required",
             )
         return spec.handler(payload)
 
@@ -278,6 +318,20 @@ class DelegationPolicy:
     max_total_delegations: int = 10
     max_calls_per_worker: int = 3
     prevent_cycles: bool = True
+
+    def __post_init__(self) -> None:
+        if isinstance(self.max_depth, bool) or self.max_depth < 1:
+            raise ValueError("max_depth must be an integer >= 1")
+        if (
+            isinstance(self.max_total_delegations, bool)
+            or self.max_total_delegations < 1
+        ):
+            raise ValueError("max_total_delegations must be an integer >= 1")
+        if (
+            isinstance(self.max_calls_per_worker, bool)
+            or self.max_calls_per_worker < 1
+        ):
+            raise ValueError("max_calls_per_worker must be an integer >= 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,11 +387,7 @@ class SupervisorGate:
         return tuple(self._receipts)
 
     def delegate(self, task: DelegationTask[TPayload]) -> DelegationReceipt[object]:
-        effective_lineage = (
-            task.lineage
-            if task.lineage
-            else (task.caller,)
-        )
+        effective_lineage = task.lineage if task.lineage else (task.caller,)
         if effective_lineage[-1] != task.caller:
             effective_lineage = (*effective_lineage, task.caller)
 
@@ -468,7 +518,7 @@ class ArtifactPointer:
             "ref_id": self.ref_id,
             "kind": self.kind,
             "byte_size": self.byte_size,
-            "sha256": self.sha256[:16],
+            "sha256_prefix": self.sha256[:16],
             "version": self.version,
             "summary": self.summary,
         }
@@ -490,8 +540,8 @@ class PassByRefBlackboard:
         max_summary_chars: int = 240,
         clock: Callable[[], int] | None = None,
     ) -> None:
-        if max_summary_chars < 16:
-            raise ValueError("max_summary_chars must be >= 16")
+        if isinstance(max_summary_chars, bool) or max_summary_chars < 16:
+            raise ValueError("max_summary_chars must be an integer >= 16")
         self._max_summary_chars = max_summary_chars
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._records: dict[str, _StoredArtifact] = {}
@@ -510,9 +560,10 @@ class PassByRefBlackboard:
     ) -> ArtifactPointer:
         if not key.strip():
             raise ValueError("Artifact key must be non-empty")
-        serialized = json.dumps(
-            value, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        if ttl_ms is not None and (isinstance(ttl_ms, bool) or ttl_ms <= 0):
+            raise ValueError("ttl_ms must be a positive integer when provided")
+
+        serialized = canonical_json(value).encode("utf-8")
         digest = hashlib.sha256(serialized).hexdigest()
         version = self._versions_by_key.get(key, 0) + 1
         self._versions_by_key[key] = version

@@ -51,14 +51,15 @@ Reference implementations live in [`python/agentic_patterns/resilience.py`](../.
 ### Python Reference Usage
 
 ```python
+import asyncio
 from agentic_patterns.resilience import RetryPolicy, WatchdogRetryRunner
 
 runner = WatchdogRetryRunner(
     policy=RetryPolicy(
         max_attempts=3,
         timeout_ms=2_500,
-        base_backoff_ms=100,
-        max_backoff_ms=1_000,
+        base_backoff_ms=10,
+        max_backoff_ms=100,
         circuit_failure_threshold=5,
         circuit_cooldown_ms=30_000,
     )
@@ -77,6 +78,23 @@ outcome = runner.run(
     repair=lambda prev, err, _att: {"limit": 100} if "100" in err else prev,
 )
 assert outcome.succeeded and len(outcome.value or []) == 100
+
+
+async def query_api_async(params: dict[str, int], _attempt: int) -> list[int]:
+    await asyncio.sleep(0.001)
+    if params["limit"] > 100:
+        raise ValueError("limit must be <= 100")
+    return list(range(params["limit"]))
+
+
+async_outcome = asyncio.run(
+    runner.run_async(
+        initial_input={"limit": 500},
+        operation=query_api_async,
+        repair=lambda prev, err, _att: {"limit": 100} if "100" in err else prev,
+    )
+)
+assert async_outcome.succeeded and len(async_outcome.value or []) == 100
 ```
 
 ### TypeScript Reference Usage
@@ -88,14 +106,14 @@ const runner = new WatchdogRetryRunner({
   policy: {
     maxAttempts: 3,
     timeoutMs: 2_500,
-    baseBackoffMs: 100,
-    maxBackoffMs: 1_000,
+    baseBackoffMs: 10,
+    maxBackoffMs: 100,
     circuitFailureThreshold: 5,
     circuitCooldownMs: 30_000,
   },
 });
 
-const outcome = runner.run<{ readonly limit: number }, number[]>({
+const syncOutcome = runner.run<{ readonly limit: number }, number[]>({
   initialInput: { limit: 500 },
   operation: (params) => {
     if (params.limit > 100) {
@@ -103,7 +121,21 @@ const outcome = runner.run<{ readonly limit: number }, number[]>({
     }
     return Array.from({ length: params.limit }, (_, i) => i);
   },
-  repair: (_prev, err) => (err.includes("100") ? { limit: 100 } : _prev),
+  repair: (prev, err) => (err.includes("100") ? { limit: 100 } : prev),
+});
+
+const asyncOutcome = await runner.runAsync<{ readonly limit: number }, number[]>({
+  initialInput: { limit: 500 },
+  operation: async (params, _attempt, signal) => {
+    if (signal.aborted) {
+      throw new Error("aborted");
+    }
+    if (params.limit > 100) {
+      throw new RangeError("limit must be <= 100");
+    }
+    return Array.from({ length: params.limit }, (_, i) => i);
+  },
+  repair: (prev, err) => (err.includes("100") ? { limit: 100 } : prev),
 });
 ```
 

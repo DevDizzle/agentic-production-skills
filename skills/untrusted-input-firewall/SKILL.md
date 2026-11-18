@@ -100,7 +100,7 @@ firewall.assertToolAllowed({
 ## 5. Production Verification Checklist
 
 When applying this skill to a codebase, write automated tests verifying:
-- [ ] **Stealth Unicode Stripping:** Zero-width spaces (`\u200b`), bidi overrides (`\u202e`), and Unicode Tag characters (`\U000e0001`) are stripped from `sanitized_text` and recorded in `findings`.
-- [ ] **Unpredictable Spotlighting Boundary:** Each call wraps content in `<untrusted_data_<nonce>>` and neutralizes any embedded `</untrusted_data...>` substring inside the body so attackers cannot close the tag.
-- [ ] **High-Risk Quarantine:** Payloads combining instruction-override phrases, synthetic `<system>` tags, or `![...](https://...?...)` exfiltration beacons exceed `quarantine_threshold` and replace raw text with `[QUARANTINED_UNTRUSTED_CONTENT]`.
+- [ ] **Stealth & Homoglyph Normalization:** Soft hyphens (`\u00ad`), zero-width spaces (`\u200b`), variation selectors (`\ufe0f`), bidi overrides (`\u202e`), and Unicode Tag characters (`\U000e0001`) are stripped, and text is `NFKC`-normalized so fullwidth homoglyphs (`＜system＞`) cannot evade detection.
+- [ ] **Unpredictable CSPRNG Spotlighting Boundary:** Each call wraps content in `<untrusted_data_<nonce>>` generated from OS CSPRNG entropy and neutralizes embedded `</untrusted_data...>`, synthetic `<system>`/`<tool_call>` tags, and external markdown image beacons inside the body.
+- [ ] **Single-Vector Quarantine & Redaction:** Standalone direct instruction overrides, synthetic role delimiters, secret-exfiltration prompts, or external `![...](https://...)` markdown beacons each exceed default `quarantine_threshold=0.70` (`severity=0.75`), redacting both `spotlighted_text` and `sanitized_text`.
 - [ ] **Taint-Based Tool Blocking:** Calling `assert_tool_allowed()` for any tool in `privileged_tools` when `context_tainted=True` and `explicit_human_override=False` raises `PrivilegeViolationError`.

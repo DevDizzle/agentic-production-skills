@@ -36,10 +36,13 @@ from .coordination import (
     SupervisorGate,
     ToolScopeViolationError,
     ToolSpec,
+    canonical_json,
+    sha256_hex,
 )
 from .resilience import (
     ActionProposal,
     ApprovalTicket,
+    AsyncVoterSpec,
     AttemptRecord,
     Ballot,
     CheckpointSnapshot,
@@ -80,6 +83,7 @@ __all__ = [
     "ActionProposal",
     "ApprovalTicket",
     "ArtifactPointer",
+    "AsyncVoterSpec",
     "AttemptRecord",
     "AuditCriterion",
     "AuditPacket",
@@ -145,5 +149,7 @@ __all__ = [
     "UntrustedInputFirewall",
     "VoterSpec",
     "WatchdogRetryRunner",
+    "canonical_json",
+    "sha256_hex",
     "strip_reasoning_trace",
 ]

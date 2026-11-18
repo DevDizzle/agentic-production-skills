@@ -13,7 +13,18 @@ declare module "node:assert/strict" {
   export function ok(value: unknown, message?: string): asserts value;
   export function throws(
     block: () => unknown,
-    error?: RegExp | (new (...args: never[]) => Error) | ((err: unknown) => boolean),
+    error?:
+      | RegExp
+      | (new (...args: never[]) => Error)
+      | ((err: unknown) => boolean),
     message?: string,
   ): void;
+  export function rejects(
+    block: () => Promise<unknown>,
+    error?:
+      | RegExp
+      | (new (...args: never[]) => Error)
+      | ((err: unknown) => boolean),
+    message?: string,
+  ): Promise<void>;
 }
