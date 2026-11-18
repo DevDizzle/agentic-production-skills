@@ -1,0 +1,16 @@
+{
+  "name": "agentic-production-skills",
+  "displayName": "Agentic Production Skills",
+  "description": "Twelve production architecture skills and zero-dependency Python and TypeScript reference implementations for reliable, auditable, and resilient AI agent systems.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Evan Parra",
+    "url": "https://evanparra.ai"
+  },
+  "repository": "https://github.com/DevDizzle/agentic-production-skills",
+  "suggestedPrompts": [
+    "Add an untrusted input firewall and spotlighting boundary around our RAG retrieval pipeline",
+    "Wrap side-effecting agent tool calls in idempotent checkpointing and tiered human escalation",
+    "Audit our multi-agent workflow for unbounded delegation loops, context bloat, and missing guardrails"
+  ]
+}

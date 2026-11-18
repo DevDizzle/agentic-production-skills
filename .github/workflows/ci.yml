@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Python 3.12 & Strict TypeScript Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Run Python 3.12 unit tests
+        run: npm run test:py
+
+      - name: Run TypeScript strict typecheck
+        run: npx --yes -p typescript@5.8.2 tsc -p tsconfig.json
+
+      - name: Run Node native TypeScript unit tests
+        run: node --experimental-strip-types --test tests/typescript/patterns.test.ts

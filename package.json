@@ -1,0 +1,43 @@
+{
+  "name": "agentic-production-skills",
+  "version": "1.0.0",
+  "description": "Zero-dependency production architectural patterns and installable AI coding skills for reliable, auditable, and resilient agent systems.",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Evan Parra",
+    "url": "https://evanparra.ai"
+  },
+  "homepage": "https://evanparra.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DevDizzle/agentic-production-skills.git"
+  },
+  "exports": {
+    ".": "./typescript/src/index.ts",
+    "./coordination": "./typescript/src/coordination.ts",
+    "./compliance": "./typescript/src/compliance.ts",
+    "./resilience": "./typescript/src/resilience.ts"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "test": "npm run test:py && npm run test:ts",
+    "test:ts": "node --test tests/typescript/patterns.test.ts",
+    "test:py": "PYTHONPATH=python python3 -m unittest discover -s tests/python -v",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "keywords": [
+    "ai-agents",
+    "agent-skills",
+    "claude-code",
+    "antigravity",
+    "cursor",
+    "codex",
+    "guardrails",
+    "multi-agent",
+    "typescript",
+    "python"
+  ]
+}

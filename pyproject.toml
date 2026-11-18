@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-production-skills"
+version = "1.0.0"
+description = "Zero-dependency production architectural patterns for reliable, auditable, and resilient AI agent systems."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+  { name = "Evan Parra" }
+]
+keywords = [
+  "ai-agents",
+  "agentic-architecture",
+  "guardrails",
+  "reliability",
+  "auditability",
+  "skills",
+  "orchestration"
+]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Application Frameworks",
+  "Typing :: Typed"
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://evanparra.ai"
+Repository = "https://github.com/DevDizzle/agentic-production-skills"
+Issues = "https://github.com/DevDizzle/agentic-production-skills/issues"
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["agentic_patterns*"]

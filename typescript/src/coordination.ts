@@ -1,0 +1,817 @@
+/**
+ * Coordination and context-hygiene patterns for multi-step AI agents.
+ *
+ * Implements Skills 1-3 in strict zero-dependency TypeScript:
+ * 1. IntentRouter and ScopedToolRegistry (intent-and-tool-routing)
+ * 2. SupervisorGate (supervisor-delegation-gate)
+ * 3. PassByRefBlackboard (pass-by-reference-blackboard)
+ */
+
+// ---------------------------------------------------------------------------
+// Deterministic Canonical JSON and Pure ES2023 FIPS 180-4 SHA-256
+// ---------------------------------------------------------------------------
+
+export function canonicalJson(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "null";
+  }
+  if (typeof value === "boolean" || typeof value === "number") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return "[" + value.map((item) => canonicalJson(item)).join(",") + "]";
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record).sort();
+    const parts: string[] = [];
+    for (const key of keys) {
+      const prop = record[key];
+      if (prop !== undefined) {
+        parts.push(`${JSON.stringify(key)}:${canonicalJson(prop)}`);
+      }
+    }
+    return "{" + parts.join(",") + "}";
+  }
+  return JSON.stringify(String(value));
+}
+
+export function utf8Bytes(input: string): Uint8Array {
+  const bytes: number[] = [];
+  for (let i = 0; i < input.length; i++) {
+    let code = input.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < input.length) {
+      const next = input.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        code = ((code - 0xd800) << 10) + (next - 0xdc00) + 0x10000;
+        i++;
+      }
+    }
+    if (code < 0x80) {
+      bytes.push(code);
+    } else if (code < 0x800) {
+      bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+    } else if (code < 0x10000) {
+      bytes.push(
+        0xe0 | (code >> 12),
+        0x80 | ((code >> 6) & 0x3f),
+        0x80 | (code & 0x3f),
+      );
+    } else {
+      bytes.push(
+        0xf0 | (code >> 18),
+        0x80 | ((code >> 12) & 0x3f),
+        0x80 | ((code >> 6) & 0x3f),
+        0x80 | (code & 0x3f),
+      );
+    }
+  }
+  return new Uint8Array(bytes);
+}
+
+const SHA256_K: readonly number[] = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+  0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+  0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+  0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+  0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+  0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+function rotr(value: number, shift: number): number {
+  return (value >>> shift) | (value << (32 - shift));
+}
+
+export function sha256Bytes(data: Uint8Array): string {
+  const bitLen = data.length * 8;
+  const totalLen = (((data.length + 9 + 63) >> 6) << 6);
+  const padded = new Uint8Array(totalLen);
+  padded.set(data);
+  padded[data.length] = 0x80;
+
+  const view = new DataView(padded.buffer);
+  const highBits = Math.floor(bitLen / 0x100000000);
+  const lowBits = bitLen >>> 0;
+  view.setUint32(totalLen - 8, highBits, false);
+  view.setUint32(totalLen - 4, lowBits, false);
+
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+
+  const w = new Uint32Array(64);
+
+  for (let offset = 0; offset < totalLen; offset += 64) {
+    for (let i = 0; i < 16; i++) {
+      w[i] = view.getUint32(offset + i * 4, false);
+    }
+    for (let i = 16; i < 64; i++) {
+      const w15 = w[i - 15] ?? 0;
+      const w2 = w[i - 2] ?? 0;
+      const w16 = w[i - 16] ?? 0;
+      const w7 = w[i - 7] ?? 0;
+      const s0 = rotr(w15, 7) ^ rotr(w15, 18) ^ (w15 >>> 3);
+      const s1 = rotr(w2, 17) ^ rotr(w2, 19) ^ (w2 >>> 10);
+      w[i] = (w16 + s0 + w7 + s1) >>> 0;
+    }
+
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    let f = h5;
+    let g = h6;
+    let h = h7;
+
+    for (let i = 0; i < 64; i++) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const ki = SHA256_K[i] ?? 0;
+      const wi = w[i] ?? 0;
+      const temp1 = (h + S1 + ch + ki + wi) >>> 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
+  }
+
+  return [h0, h1, h2, h3, h4, h5, h6, h7]
+    .map((word) => word.toString(16).padStart(8, "0"))
+    .join("");
+}
+
+export function sha256Hex(text: string): string {
+  return sha256Bytes(utf8Bytes(text));
+}
+
+// ---------------------------------------------------------------------------
+// Skill 1: Intent and Tool Routing
+// ---------------------------------------------------------------------------
+
+export class ToolScopeViolationError extends Error {
+  public readonly activeIntent: string;
+  public readonly toolName: string;
+  public readonly allowedIntents: readonly string[];
+
+  public constructor(params: {
+    activeIntent: string;
+    toolName: string;
+    allowedIntents: readonly string[];
+  }) {
+    const allowed =
+      params.allowedIntents.length > 0
+        ? [...params.allowedIntents].sort().join(", ")
+        : "<none>";
+    super(
+      `Tool '${params.toolName}' is not permitted for intent '${params.activeIntent}' (allowed intents: ${allowed}).`,
+    );
+    this.name = "ToolScopeViolationError";
+    this.activeIntent = params.activeIntent;
+    this.toolName = params.toolName;
+    this.allowedIntents = [...params.allowedIntents];
+  }
+}
+
+export interface RouteRule {
+  readonly intent: string;
+  readonly keywords?: readonly string[];
+  readonly predicate?: (utterance: string) => boolean;
+  readonly priority?: number;
+}
+
+export type MatchedBy = "rule" | "classifier" | "fallback";
+
+export interface IntentDecision {
+  readonly intent: string;
+  readonly confidence: number;
+  readonly matchedBy: MatchedBy;
+  readonly reason: string;
+}
+
+export type ClassifierFn = (utterance: string) => {
+  readonly intent: string;
+  readonly confidence: number;
+};
+
+export interface IntentRouterOptions {
+  readonly rules?: readonly RouteRule[];
+  readonly classifier?: ClassifierFn;
+  readonly minConfidence?: number;
+  readonly fallbackIntent?: string;
+  readonly knownIntents?: ReadonlySet<string> | readonly string[];
+}
+
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export class IntentRouter {
+  private readonly rules: readonly RouteRule[];
+  private readonly classifier: ClassifierFn | undefined;
+  private readonly minConfidence: number;
+  private readonly fallbackIntent: string;
+  private readonly knownIntents: ReadonlySet<string> | undefined;
+
+  public constructor(options: IntentRouterOptions = {}) {
+    const minConfidence = options.minConfidence ?? 0.75;
+    if (minConfidence < 0 || minConfidence > 1) {
+      throw new RangeError("minConfidence must be between 0.0 and 1.0");
+    }
+    this.rules = [...(options.rules ?? [])].sort(
+      (a, b) => (b.priority ?? 0) - (a.priority ?? 0),
+    );
+    this.classifier = options.classifier;
+    this.minConfidence = minConfidence;
+    this.fallbackIntent = options.fallbackIntent ?? "triage";
+    this.knownIntents = options.knownIntents
+      ? new Set(options.knownIntents)
+      : undefined;
+  }
+
+  public route(utterance: string): IntentDecision {
+    const normalized = utterance.trim();
+    if (normalized.length === 0) {
+      return {
+        intent: this.fallbackIntent,
+        confidence: 0,
+        matchedBy: "fallback",
+        reason: "empty_utterance",
+      };
+    }
+
+    const lowered = normalized.toLowerCase();
+    for (const rule of this.rules) {
+      if (rule.predicate && rule.predicate(normalized)) {
+        return {
+          intent: rule.intent,
+          confidence: 1.0,
+          matchedBy: "rule",
+          reason: `predicate:${rule.intent}`,
+        };
+      }
+      for (const kw of rule.keywords ?? []) {
+        const pattern = new RegExp(`\\b${escapeRegExp(kw.toLowerCase())}\\b`);
+        if (pattern.test(lowered)) {
+          return {
+            intent: rule.intent,
+            confidence: 1.0,
+            matchedBy: "rule",
+            reason: `keyword:${kw.toLowerCase()}`,
+          };
+        }
+      }
+    }
+
+    if (this.classifier) {
+      const classified = this.classifier(normalized);
+      const confidence = Math.max(0, Math.min(1, classified.confidence));
+      if (this.knownIntents && !this.knownIntents.has(classified.intent)) {
+        return {
+          intent: this.fallbackIntent,
+          confidence,
+          matchedBy: "fallback",
+          reason: `unknown_intent:${classified.intent}`,
+        };
+      }
+      if (confidence >= this.minConfidence) {
+        return {
+          intent: classified.intent,
+          confidence,
+          matchedBy: "classifier",
+          reason: "confidence_threshold_met",
+        };
+      }
+      return {
+        intent: this.fallbackIntent,
+        confidence,
+        matchedBy: "fallback",
+        reason: `below_confidence_threshold:${confidence.toFixed(2)}<${this.minConfidence.toFixed(2)}`,
+      };
+    }
+
+    return {
+      intent: this.fallbackIntent,
+      confidence: 0,
+      matchedBy: "fallback",
+      reason: "no_rule_matched_and_no_classifier",
+    };
+  }
+}
+
+export interface ToolSpec<TIn = unknown, TOut = unknown> {
+  readonly name: string;
+  readonly description: string;
+  readonly allowedIntents: readonly string[];
+  readonly readOnly?: boolean;
+  readonly handler: (payload: TIn) => TOut;
+}
+
+export interface ToolManifestEntry {
+  readonly name: string;
+  readonly description: string;
+  readonly readOnly: boolean;
+}
+
+interface StoredTool {
+  readonly name: string;
+  readonly description: string;
+  readonly allowedIntents: ReadonlySet<string>;
+  readonly readOnly: boolean;
+  readonly handler: (payload: unknown) => unknown;
+}
+
+export class ScopedToolRegistry {
+  private readonly tools = new Map<string, StoredTool>();
+
+  public register<TIn, TOut>(spec: ToolSpec<TIn, TOut>): void {
+    if (spec.name.trim().length === 0) {
+      throw new Error("Tool name must be non-empty");
+    }
+    if (this.tools.has(spec.name)) {
+      throw new Error(`Duplicate tool registration: '${spec.name}'`);
+    }
+    this.tools.set(spec.name, {
+      name: spec.name,
+      description: spec.description,
+      allowedIntents: new Set(spec.allowedIntents),
+      readOnly: spec.readOnly ?? true,
+      handler: (payload: unknown): unknown => spec.handler(payload as TIn),
+    });
+  }
+
+  public exportManifest(
+    intent: string,
+    options: { readonly readOnlyOnly?: boolean } = {},
+  ): ToolManifestEntry[] {
+    const entries: ToolManifestEntry[] = [];
+    for (const spec of this.tools.values()) {
+      if (!spec.allowedIntents.has(intent)) {
+        continue;
+      }
+      if (options.readOnlyOnly && !spec.readOnly) {
+        continue;
+      }
+      entries.push({
+        name: spec.name,
+        description: spec.description,
+        readOnly: spec.readOnly,
+      });
+    }
+    return entries;
+  }
+
+  public invoke<TOut = unknown>(params: {
+    readonly activeIntent: string;
+    readonly toolName: string;
+    readonly payload: unknown;
+    readonly requireReadOnly?: boolean;
+  }): TOut {
+    const spec = this.tools.get(params.toolName);
+    if (!spec) {
+      throw new Error(`Unknown tool: '${params.toolName}'`);
+    }
+    if (!spec.allowedIntents.has(params.activeIntent)) {
+      throw new ToolScopeViolationError({
+        activeIntent: params.activeIntent,
+        toolName: params.toolName,
+        allowedIntents: [...spec.allowedIntents],
+      });
+    }
+    if (params.requireReadOnly && !spec.readOnly) {
+      throw new ToolScopeViolationError({
+        activeIntent: params.activeIntent,
+        toolName: params.toolName,
+        allowedIntents: [],
+      });
+    }
+    return spec.handler(params.payload) as TOut;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Skill 2: Supervisor Delegation Gate
+// ---------------------------------------------------------------------------
+
+export type DenialReason =
+  | "UNKNOWN_WORKER"
+  | "TRANSITION_FORBIDDEN"
+  | "CYCLE_DETECTED"
+  | "MAX_DEPTH_EXCEEDED"
+  | "WORKER_QUOTA_EXCEEDED"
+  | "BUDGET_EXHAUSTED";
+
+export class DelegationDeniedError extends Error {
+  public readonly reason: DenialReason;
+  public readonly caller: string;
+  public readonly worker: string;
+  public readonly lineage: readonly string[];
+
+  public constructor(params: {
+    reason: DenialReason;
+    caller: string;
+    worker: string;
+    lineage: readonly string[];
+    detail: string;
+  }) {
+    super(`[${params.reason}] ${params.caller} -> ${params.worker}: ${params.detail}`);
+    this.name = "DelegationDeniedError";
+    this.reason = params.reason;
+    this.caller = params.caller;
+    this.worker = params.worker;
+    this.lineage = [...params.lineage];
+  }
+}
+
+export interface DelegationPolicy {
+  readonly allowedTransitions: Readonly<Record<string, readonly string[]>>;
+  readonly maxDepth?: number;
+  readonly maxTotalDelegations?: number;
+  readonly maxCallsPerWorker?: number;
+  readonly preventCycles?: boolean;
+}
+
+export interface DelegationTask<TPayload = unknown> {
+  readonly taskId: string;
+  readonly caller: string;
+  readonly worker: string;
+  readonly objective: string;
+  readonly payload: TPayload;
+  readonly lineage?: readonly string[];
+}
+
+export interface DelegationReceipt<TResult = unknown> {
+  readonly taskId: string;
+  readonly caller: string;
+  readonly worker: string;
+  readonly depth: number;
+  readonly sequenceNum: number;
+  readonly lineage: readonly string[];
+  readonly output: TResult;
+}
+
+export class SupervisorGate {
+  private readonly allowedTransitions: ReadonlyMap<string, ReadonlySet<string>>;
+  private readonly maxDepth: number;
+  private readonly maxTotalDelegations: number;
+  private readonly maxCallsPerWorker: number;
+  private readonly preventCycles: boolean;
+  private readonly workers = new Map<
+    string,
+    (task: DelegationTask<unknown>) => unknown
+  >();
+  private totalDelegations = 0;
+  private readonly workerCounts = new Map<string, number>();
+  private readonly recordedReceipts: DelegationReceipt<unknown>[] = [];
+
+  public constructor(policy: DelegationPolicy) {
+    const map = new Map<string, ReadonlySet<string>>();
+    for (const [caller, targets] of Object.entries(policy.allowedTransitions)) {
+      map.set(caller, new Set(targets));
+    }
+    this.allowedTransitions = map;
+    this.maxDepth = policy.maxDepth ?? 3;
+    this.maxTotalDelegations = policy.maxTotalDelegations ?? 10;
+    this.maxCallsPerWorker = policy.maxCallsPerWorker ?? 3;
+    this.preventCycles = policy.preventCycles ?? true;
+  }
+
+  public registerWorker<TPayload, TResult>(
+    name: string,
+    handler: (task: DelegationTask<TPayload>) => TResult,
+  ): void {
+    if (name.trim().length === 0) {
+      throw new Error("Worker name must be non-empty");
+    }
+    this.workers.set(name, (task: DelegationTask<unknown>): unknown =>
+      handler(task as DelegationTask<TPayload>),
+    );
+  }
+
+  public get remainingBudget(): number {
+    return Math.max(0, this.maxTotalDelegations - this.totalDelegations);
+  }
+
+  public get receipts(): readonly DelegationReceipt<unknown>[] {
+    return [...this.recordedReceipts];
+  }
+
+  public delegate<TPayload, TResult = unknown>(
+    task: DelegationTask<TPayload>,
+  ): DelegationReceipt<TResult> {
+    const baseLineage =
+      task.lineage && task.lineage.length > 0 ? [...task.lineage] : [task.caller];
+    if (baseLineage[baseLineage.length - 1] !== task.caller) {
+      baseLineage.push(task.caller);
+    }
+
+    const allowedTargets = this.allowedTransitions.get(task.caller);
+    if (!allowedTargets || !allowedTargets.has(task.worker)) {
+      throw new DelegationDeniedError({
+        reason: "TRANSITION_FORBIDDEN",
+        caller: task.caller,
+        worker: task.worker,
+        lineage: baseLineage,
+        detail: `Transition '${task.caller}' -> '${task.worker}' is not permitted`,
+      });
+    }
+
+    if (this.preventCycles && baseLineage.includes(task.worker)) {
+      throw new DelegationDeniedError({
+        reason: "CYCLE_DETECTED",
+        caller: task.caller,
+        worker: task.worker,
+        lineage: baseLineage,
+        detail: `Cycle detected along lineage ${[...baseLineage, task.worker].join(" -> ")}`,
+      });
+    }
+
+    const depth = baseLineage.length;
+    if (depth > this.maxDepth) {
+      throw new DelegationDeniedError({
+        reason: "MAX_DEPTH_EXCEEDED",
+        caller: task.caller,
+        worker: task.worker,
+        lineage: baseLineage,
+        detail: `Delegation depth ${depth} exceeds maxDepth=${this.maxDepth}`,
+      });
+    }
+
+    if (this.totalDelegations >= this.maxTotalDelegations) {
+      throw new DelegationDeniedError({
+        reason: "BUDGET_EXHAUSTED",
+        caller: task.caller,
+        worker: task.worker,
+        lineage: baseLineage,
+        detail: `Global limit of ${this.maxTotalDelegations} delegations reached`,
+      });
+    }
+
+    const handler = this.workers.get(task.worker);
+    if (!handler) {
+      throw new DelegationDeniedError({
+        reason: "UNKNOWN_WORKER",
+        caller: task.caller,
+        worker: task.worker,
+        lineage: baseLineage,
+        detail: `Worker '${task.worker}' is not registered`,
+      });
+    }
+
+    const usedCalls = this.workerCounts.get(task.worker) ?? 0;
+    if (usedCalls >= this.maxCallsPerWorker) {
+      throw new DelegationDeniedError({
+        reason: "WORKER_QUOTA_EXCEEDED",
+        caller: task.caller,
+        worker: task.worker,
+        lineage: baseLineage,
+        detail: `Worker '${task.worker}' reached quota (${this.maxCallsPerWorker})`,
+      });
+    }
+
+    this.totalDelegations += 1;
+    const seq = this.totalDelegations;
+    this.workerCounts.set(task.worker, usedCalls + 1);
+
+    const nextLineage = [...baseLineage, task.worker];
+    const forwardedTask: DelegationTask<unknown> = {
+      taskId: task.taskId,
+      caller: task.caller,
+      worker: task.worker,
+      objective: task.objective,
+      payload: task.payload,
+      lineage: nextLineage,
+    };
+
+    const output = handler(forwardedTask) as TResult;
+    const receipt: DelegationReceipt<TResult> = {
+      taskId: task.taskId,
+      caller: task.caller,
+      worker: task.worker,
+      depth,
+      sequenceNum: seq,
+      lineage: nextLineage,
+      output,
+    };
+    this.recordedReceipts.push(receipt);
+    return receipt;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Skill 3: Pass-by-Reference Blackboard
+// ---------------------------------------------------------------------------
+
+export class BlackboardError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "BlackboardError";
+  }
+}
+
+export class BlackboardAccessError extends BlackboardError {
+  public constructor(message: string) {
+    super(message);
+    this.name = "BlackboardAccessError";
+  }
+}
+
+export class BlackboardIntegrityError extends BlackboardError {
+  public constructor(message: string) {
+    super(message);
+    this.name = "BlackboardIntegrityError";
+  }
+}
+
+export class BlackboardExpiredError extends BlackboardError {
+  public constructor(message: string) {
+    super(message);
+    this.name = "BlackboardExpiredError";
+  }
+}
+
+export interface ContextToken {
+  readonly refId: string;
+  readonly kind: string;
+  readonly byteSize: number;
+  readonly sha256Prefix: string;
+  readonly version: number;
+  readonly summary: string;
+}
+
+export interface ArtifactPointer {
+  readonly refId: string;
+  readonly key: string;
+  readonly kind: string;
+  readonly sha256: string;
+  readonly byteSize: number;
+  readonly summary: string;
+  readonly producer: string;
+  readonly version: number;
+  readonly createdAtMs: number;
+  readonly expiresAtMs: number | null;
+  toContextToken(): ContextToken;
+}
+
+interface StoredArtifact {
+  readonly pointer: ArtifactPointer;
+  serializedJson: string;
+  readonly allowedReaders: ReadonlySet<string> | null;
+}
+
+export class PassByRefBlackboard {
+  private readonly maxSummaryChars: number;
+  private readonly clock: () => number;
+  private readonly records = new Map<string, StoredArtifact>();
+  private readonly versionsByKey = new Map<string, number>();
+
+  public constructor(options: {
+    readonly maxSummaryChars?: number;
+    readonly clock?: () => number;
+  } = {}) {
+    const maxSummaryChars = options.maxSummaryChars ?? 240;
+    if (maxSummaryChars < 16) {
+      throw new RangeError("maxSummaryChars must be >= 16");
+    }
+    this.maxSummaryChars = maxSummaryChars;
+    this.clock = options.clock ?? (() => Date.now());
+  }
+
+  public put(params: {
+    readonly key: string;
+    readonly value: unknown;
+    readonly kind: string;
+    readonly summary: string;
+    readonly producer: string;
+    readonly allowedReaders?: readonly string[];
+    readonly ttlMs?: number;
+  }): ArtifactPointer {
+    if (params.key.trim().length === 0) {
+      throw new Error("Artifact key must be non-empty");
+    }
+    const serialized = canonicalJson(params.value);
+    const bytes = utf8Bytes(serialized);
+    const digest = sha256Bytes(bytes);
+    const version = (this.versionsByKey.get(params.key) ?? 0) + 1;
+    this.versionsByKey.set(params.key, version);
+
+    let cleanSummary = params.summary.trim().replace(/\s+/g, " ");
+    if (cleanSummary.length > this.maxSummaryChars) {
+      cleanSummary = cleanSummary.slice(0, this.maxSummaryChars - 3) + "...";
+    }
+
+    const nowMs = this.clock();
+    const expiresAtMs =
+      params.ttlMs !== undefined ? nowMs + params.ttlMs : null;
+    const refId = `ref:${params.key}:v${version}:${digest.slice(0, 12)}`;
+
+    const pointer: ArtifactPointer = {
+      refId,
+      key: params.key,
+      kind: params.kind,
+      sha256: digest,
+      byteSize: bytes.length,
+      summary: cleanSummary,
+      producer: params.producer,
+      version,
+      createdAtMs: nowMs,
+      expiresAtMs,
+      toContextToken(): ContextToken {
+        return {
+          refId,
+          kind: params.kind,
+          byteSize: bytes.length,
+          sha256Prefix: digest.slice(0, 16),
+          version,
+          summary: cleanSummary,
+        };
+      },
+    };
+
+    this.records.set(refId, {
+      pointer,
+      serializedJson: serialized,
+      allowedReaders: params.allowedReaders
+        ? new Set(params.allowedReaders)
+        : null,
+    });
+    return pointer;
+  }
+
+  public resolve<T = unknown>(refId: string, reader: string): T {
+    const record = this.records.get(refId);
+    if (!record) {
+      throw new Error(`Unknown artifact reference: '${refId}'`);
+    }
+    const ptr = record.pointer;
+    const nowMs = this.clock();
+
+    if (ptr.expiresAtMs !== null && nowMs >= ptr.expiresAtMs) {
+      throw new BlackboardExpiredError(
+        `Artifact '${refId}' expired at ${ptr.expiresAtMs} (now=${nowMs})`,
+      );
+    }
+
+    if (
+      record.allowedReaders !== null &&
+      reader !== ptr.producer &&
+      !record.allowedReaders.has(reader)
+    ) {
+      throw new BlackboardAccessError(
+        `Reader '${reader}' is not permitted to dereference '${refId}'`,
+      );
+    }
+
+    const actualDigest = sha256Hex(record.serializedJson);
+    if (actualDigest !== ptr.sha256) {
+      throw new BlackboardIntegrityError(
+        `SHA-256 mismatch for '${refId}': expected ${ptr.sha256}, got ${actualDigest}`,
+      );
+    }
+
+    return JSON.parse(record.serializedJson) as T;
+  }
+
+  public pruneExpired(): number {
+    const nowMs = this.clock();
+    let removed = 0;
+    for (const [refId, rec] of this.records.entries()) {
+      if (rec.pointer.expiresAtMs !== null && nowMs >= rec.pointer.expiresAtMs) {
+        this.records.delete(refId);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+}
