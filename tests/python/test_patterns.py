@@ -1023,17 +1023,31 @@ class TestAsyncResiliencePatterns(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(c_res.reached)
         self.assertEqual(c_res.winner, "SEV1")
 
-        # 4. ShadowCanaryRunner.execute_async
-        shadow = ShadowCanaryRunner(
+        # 4. ShadowCanaryRunner.execute_async (typed async callables + legitimate None output)
+        shadow: ShadowCanaryRunner[str, str] = ShadowCanaryRunner(
             mode=RolloutMode.SHADOW,
-            baseline=lambda q: asyncio.sleep(0.002, result=f"v1:{q}"),  # type: ignore[arg-type,return-value]
-            candidate=lambda q: asyncio.sleep(0.002, result=f"v1:{q}"),  # type: ignore[arg-type,return-value]
+            baseline=lambda q: asyncio.sleep(0.002, result=f"v1:{q}"),
+            candidate=lambda q: asyncio.sleep(0.002, result=f"v1:{q}"),
             scorer=lambda _i, b, c: 1.0 if b == c else 0.0,
             policy=PromotionPolicy(min_samples=1),
         )
         s_out = await shadow.execute_async(request_id="as-1", request_input="ping")
         self.assertEqual(s_out.response, "v1:ping")
         self.assertEqual(shadow.evaluate_promotion().decision, PromotionDecision.PROMOTE)
+
+        nullable_shadow: ShadowCanaryRunner[str, str | None] = ShadowCanaryRunner(
+            mode=RolloutMode.SHADOW,
+            baseline=lambda _q: asyncio.sleep(0.001, result=None),
+            candidate=lambda _q: asyncio.sleep(0.001, result=None),
+            scorer=lambda _i, b, c: 1.0 if b is None and c is None else 0.0,
+            policy=PromotionPolicy(min_samples=1),
+        )
+        n_out = await nullable_shadow.execute_async(request_id="as-null", request_input="empty")
+        self.assertIsNone(n_out.response)
+        self.assertEqual(n_out.sample.quality_score, 1.0)
+        self.assertEqual(
+            nullable_shadow.evaluate_promotion().decision, PromotionDecision.PROMOTE
+        )
 
 
 if __name__ == "__main__":

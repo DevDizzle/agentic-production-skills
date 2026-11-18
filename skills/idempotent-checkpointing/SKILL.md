@@ -48,6 +48,7 @@ Reference implementations live in [`python/agentic_patterns/resilience.py`](../.
 ### Python Reference Usage
 
 ```python
+import asyncio
 from agentic_patterns.resilience import IdempotentCheckpointer
 
 checkpointer = IdempotentCheckpointer()
@@ -75,6 +76,17 @@ second = checkpointer.execute_once(
     action=lambda: (_ for _ in ()).throw(AssertionError("Must not re-run")),
 )
 assert second.replayed
+
+# Async steps use execute_once_async with the same journal and in-flight lock
+async_res = asyncio.run(
+    checkpointer.execute_once_async(
+        workflow_id="wf-order-882",
+        step_name="send_receipt",
+        args={"order_id": "ORD-882"},
+        action=lambda: asyncio.sleep(0.001, result={"sent": True}),
+    )
+)
+assert async_res.output["sent"]
 ```
 
 ### TypeScript Reference Usage
@@ -104,6 +116,13 @@ const replay = checkpointer.executeOnce({
   action: () => {
     throw new Error("Must not re-execute committed side effect");
   },
+});
+
+const asyncReceipt = await checkpointer.executeOnceAsync({
+  workflowId: "wf-order-882",
+  stepName: "send_receipt",
+  args: { orderId: "ORD-882" },
+  action: async () => ({ sent: true }),
 });
 ```
 

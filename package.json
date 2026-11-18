@@ -48,7 +48,7 @@
     "test:ts": "node --experimental-strip-types --test tests/typescript/patterns.test.ts",
     "test:py": "PYTHONPATH=python python3 -m unittest discover -s tests/python -v",
     "typecheck": "npx --yes -p typescript@5.8.2 tsc -p tsconfig.json",
-    "build": "npx --yes -p typescript@5.8.2 tsc -p tsconfig.build.json"
+    "build": "npx --yes -p typescript@5.8.2 tsc -p tsconfig.build.json && node --input-type=module -e \"import fs from 'node:fs'; for (const f of fs.readdirSync('dist').filter(n => n.endsWith('.d.ts'))) { const p = 'dist/' + f; const s = fs.readFileSync(p, 'utf8'); fs.writeFileSync(p, s.replace(/(from\\s+['\\\"])(\\.\\.?\\/[^'\\\"]+)\\.ts(['\\\"])/g, (_m, a, b, c) => a + b + '.js' + c)); }\""
   },
   "keywords": [
     "ai-agents",

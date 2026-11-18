@@ -44,6 +44,15 @@ function rejectPromiseLike(
   }
 }
 
+function ensureSyncValue<T>(
+  value: T | Promise<T>,
+  syncMethod: string,
+  asyncMethod: string,
+): T {
+  rejectPromiseLike(value, syncMethod, asyncMethod);
+  return value as T;
+}
+
 export interface AbortSignalLike {
   readonly aborted: boolean;
   readonly reason?: unknown;
@@ -1934,13 +1943,13 @@ function percentile95(values: readonly number[]): number {
 
 export class ShadowCanaryRunner<TIn, TOut> {
   private readonly mode: RolloutMode;
-  private readonly baseline: (input: TIn) => TOut;
-  private readonly candidate: (input: TIn) => TOut;
+  private readonly baseline: (input: TIn) => TOut | Promise<TOut>;
+  private readonly candidate: (input: TIn) => TOut | Promise<TOut>;
   private readonly scorer: (
     input: TIn,
     baselineOutput: TOut | null,
     candidateOutput: TOut,
-  ) => number;
+  ) => number | Promise<number>;
   private readonly minSamples: number;
   private readonly maxCandidateErrorRate: number;
   private readonly minMeanQualityScore: number;
@@ -1953,13 +1962,13 @@ export class ShadowCanaryRunner<TIn, TOut> {
 
   public constructor(params: {
     readonly mode: RolloutMode;
-    readonly baseline: (input: TIn) => TOut;
-    readonly candidate: (input: TIn) => TOut;
+    readonly baseline: (input: TIn) => TOut | Promise<TOut>;
+    readonly candidate: (input: TIn) => TOut | Promise<TOut>;
     readonly scorer: (
       input: TIn,
       baselineOutput: TOut | null,
       candidateOutput: TOut,
-    ) => number;
+    ) => number | Promise<number>;
     readonly policy?: PromotionPolicy;
     readonly clock?: () => number;
   }) {
@@ -2045,37 +2054,20 @@ export class ShadowCanaryRunner<TIn, TOut> {
     return this.executeCanary(params.requestId, params.requestInput);
   }
 
-  public async executeAsync<TResolved = Awaited<TOut>>(params: {
+  public async executeAsync(params: {
     readonly requestId: string;
     readonly requestInput: TIn;
-    readonly asyncBaseline?: (input: TIn) => Promise<TResolved> | TResolved;
-    readonly asyncCandidate?: (input: TIn) => Promise<TResolved> | TResolved;
+    readonly asyncBaseline?: (input: TIn) => Promise<TOut> | TOut;
+    readonly asyncCandidate?: (input: TIn) => Promise<TOut> | TOut;
     readonly asyncScorer?: (
       input: TIn,
-      baselineOutput: TResolved | null,
-      candidateOutput: TResolved,
+      baselineOutput: TOut | null,
+      candidateOutput: TOut,
     ) => Promise<number> | number;
-  }): Promise<RolloutExecutionResult<TResolved>> {
-    const baseFn =
-      params.asyncBaseline ??
-      ((inp: TIn): Promise<TResolved> | TResolved =>
-        this.baseline(inp) as unknown as Promise<TResolved> | TResolved);
-    const candFn =
-      params.asyncCandidate ??
-      ((inp: TIn): Promise<TResolved> | TResolved =>
-        this.candidate(inp) as unknown as Promise<TResolved> | TResolved);
-    const scoreFn =
-      params.asyncScorer ??
-      ((
-        inp: TIn,
-        bOut: TResolved | null,
-        cOut: TResolved,
-      ): Promise<number> | number =>
-        this.scorer(
-          inp,
-          bOut as unknown as TOut | null,
-          cOut as unknown as TOut,
-        ));
+  }): Promise<RolloutExecutionResult<TOut>> {
+    const baseFn = params.asyncBaseline ?? this.baseline;
+    const candFn = params.asyncCandidate ?? this.candidate;
+    const scoreFn = params.asyncScorer ?? this.scorer;
 
     if (this.mode === "SHADOW") {
       return await this.executeShadowAsync(
@@ -2100,8 +2092,11 @@ export class ShadowCanaryRunner<TIn, TOut> {
     requestInput: TIn,
   ): RolloutExecutionResult<TOut> {
     const bStart = this.clock();
-    const baselineOut = this.baseline(requestInput);
-    rejectPromiseLike(baselineOut, "execute", "executeAsync");
+    const baselineOut = ensureSyncValue(
+      this.baseline(requestInput),
+      "execute",
+      "executeAsync",
+    );
     const bLatency = Math.max(1, this.clock() - bStart);
 
     const cStart = this.clock();
@@ -2111,17 +2106,23 @@ export class ShadowCanaryRunner<TIn, TOut> {
     let asyncMisuse: TypeError | null = null;
 
     try {
-      const candidateOut = this.candidate(requestInput);
+      const maybeCand = this.candidate(requestInput);
+      let candidateOut: TOut | undefined = undefined;
       try {
-        rejectPromiseLike(candidateOut, "execute", "executeAsync");
+        candidateOut = ensureSyncValue(maybeCand, "execute", "executeAsync");
       } catch (misuseErr: unknown) {
         asyncMisuse = misuseErr as TypeError;
       }
       if (asyncMisuse === null) {
         cLatency = Math.max(1, this.clock() - cStart);
-        const rawScore = this.scorer(requestInput, baselineOut, candidateOut);
+        const maybeScore = this.scorer(
+          requestInput,
+          baselineOut,
+          candidateOut as TOut,
+        );
+        let rawScore = 0;
         try {
-          rejectPromiseLike(rawScore, "execute", "executeAsync");
+          rawScore = ensureSyncValue(maybeScore, "execute", "executeAsync");
         } catch (misuseErr: unknown) {
           asyncMisuse = misuseErr as TypeError;
         }
@@ -2156,19 +2157,19 @@ export class ShadowCanaryRunner<TIn, TOut> {
     };
   }
 
-  private async executeShadowAsync<TResolved>(
+  private async executeShadowAsync(
     requestId: string,
     requestInput: TIn,
-    baseFn: (input: TIn) => Promise<TResolved> | TResolved,
-    candFn: (input: TIn) => Promise<TResolved> | TResolved,
+    baseFn: (input: TIn) => Promise<TOut> | TOut,
+    candFn: (input: TIn) => Promise<TOut> | TOut,
     scoreFn: (
       input: TIn,
-      baselineOutput: TResolved | null,
-      candidateOutput: TResolved,
+      baselineOutput: TOut | null,
+      candidateOutput: TOut,
     ) => Promise<number> | number,
-  ): Promise<RolloutExecutionResult<TResolved>> {
+  ): Promise<RolloutExecutionResult<TOut>> {
     const runBase = async (): Promise<{
-      readonly out: TResolved;
+      readonly out: TOut;
       readonly lat: number;
     }> => {
       const bStart = this.clock();
@@ -2176,17 +2177,24 @@ export class ShadowCanaryRunner<TIn, TOut> {
       return { out, lat: Math.max(1, this.clock() - bStart) };
     };
 
-    const runCand = async (): Promise<{
-      readonly out: TResolved | null;
-      readonly lat: number;
-      readonly errored: boolean;
-    }> => {
+    type CandAttempt =
+      | { readonly errored: false; readonly out: TOut; readonly lat: number }
+      | { readonly errored: true; readonly lat: number };
+
+    const runCand = async (): Promise<CandAttempt> => {
       const cStart = this.clock();
       try {
         const out = await candFn(requestInput);
-        return { out, lat: Math.max(1, this.clock() - cStart), errored: false };
+        return {
+          errored: false,
+          out,
+          lat: Math.max(1, this.clock() - cStart),
+        };
       } catch {
-        return { out: null, lat: Math.max(1, this.clock() - cStart), errored: true };
+        return {
+          errored: true,
+          lat: Math.max(1, this.clock() - cStart),
+        };
       }
     };
 
@@ -2194,7 +2202,7 @@ export class ShadowCanaryRunner<TIn, TOut> {
 
     let cErrored = candRes.errored;
     let score = 0;
-    if (!cErrored && candRes.out !== null) {
+    if (!candRes.errored) {
       try {
         const rawScore = await scoreFn(requestInput, baseRes.out, candRes.out);
         score = ShadowCanaryRunner.validateScore(rawScore);
@@ -2233,17 +2241,23 @@ export class ShadowCanaryRunner<TIn, TOut> {
       const cStart = this.clock();
       let asyncMisuse: TypeError | null = null;
       try {
-        const candidateOut = this.candidate(requestInput);
+        const maybeCand = this.candidate(requestInput);
+        let candidateOut: TOut | undefined = undefined;
         try {
-          rejectPromiseLike(candidateOut, "execute", "executeAsync");
+          candidateOut = ensureSyncValue(maybeCand, "execute", "executeAsync");
         } catch (misuseErr: unknown) {
           asyncMisuse = misuseErr as TypeError;
         }
         if (asyncMisuse === null) {
           const cLatency = Math.max(1, this.clock() - cStart);
-          const rawScore = this.scorer(requestInput, null, candidateOut);
+          const maybeScore = this.scorer(
+            requestInput,
+            null,
+            candidateOut as TOut,
+          );
+          let rawScore = 0;
           try {
-            rejectPromiseLike(rawScore, "execute", "executeAsync");
+            rawScore = ensureSyncValue(maybeScore, "execute", "executeAsync");
           } catch (misuseErr: unknown) {
             asyncMisuse = misuseErr as TypeError;
           }
@@ -2261,7 +2275,7 @@ export class ShadowCanaryRunner<TIn, TOut> {
             this.recordSample(sample);
             return {
               servedVariant: "candidate",
-              response: candidateOut,
+              response: candidateOut as TOut,
               sample,
             };
           }
@@ -2269,8 +2283,11 @@ export class ShadowCanaryRunner<TIn, TOut> {
       } catch {
         const cLatency = Math.max(1, this.clock() - cStart);
         const bStart = this.clock();
-        const fallbackOut = this.baseline(requestInput);
-        rejectPromiseLike(fallbackOut, "execute", "executeAsync");
+        const fallbackOut = ensureSyncValue(
+          this.baseline(requestInput),
+          "execute",
+          "executeAsync",
+        );
         const bLatency = Math.max(1, this.clock() - bStart);
         const sample: ComparisonSample = {
           requestId,
@@ -2295,8 +2312,11 @@ export class ShadowCanaryRunner<TIn, TOut> {
     }
 
     const bStart = this.clock();
-    const baselineOut = this.baseline(requestInput);
-    rejectPromiseLike(baselineOut, "execute", "executeAsync");
+    const baselineOut = ensureSyncValue(
+      this.baseline(requestInput),
+      "execute",
+      "executeAsync",
+    );
     const bLatency = Math.max(1, this.clock() - bStart);
     const sample: ComparisonSample = {
       requestId,
@@ -2315,17 +2335,17 @@ export class ShadowCanaryRunner<TIn, TOut> {
     };
   }
 
-  private async executeCanaryAsync<TResolved>(
+  private async executeCanaryAsync(
     requestId: string,
     requestInput: TIn,
-    baseFn: (input: TIn) => Promise<TResolved> | TResolved,
-    candFn: (input: TIn) => Promise<TResolved> | TResolved,
+    baseFn: (input: TIn) => Promise<TOut> | TOut,
+    candFn: (input: TIn) => Promise<TOut> | TOut,
     scoreFn: (
       input: TIn,
-      baselineOutput: TResolved | null,
-      candidateOutput: TResolved,
+      baselineOutput: TOut | null,
+      candidateOutput: TOut,
     ) => Promise<number> | number,
-  ): Promise<RolloutExecutionResult<TResolved>> {
+  ): Promise<RolloutExecutionResult<TOut>> {
     const inCanary =
       !this.rolledBack &&
       ShadowCanaryRunner.bucketBps(requestId) < this.canaryBps;

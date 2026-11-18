@@ -32,6 +32,10 @@ import {
   stripReasoningTrace,
 } from "../../typescript/src/index.ts";
 import type { AuditPacket, LedgerEntry } from "../../typescript/src/index.ts";
+import {
+  IntentRouter as DistIntentRouter,
+  ShadowCanaryRunner as DistShadowCanaryRunner,
+} from "../../dist/index.js";
 
 class FakeClock {
   private currentMs: number;
@@ -1043,21 +1047,56 @@ describe("Async Resilience Suite (executeOnceAsync, runAsync, decideAsync, execu
     equal(cOut.reached, true);
     equal(cOut.winner, "SEV1");
 
-    // 4. ShadowCanaryRunner.executeAsync
+    // 4. ShadowCanaryRunner.executeAsync (direct async constructor functions + legitimate null TOut)
     const shadow = new ShadowCanaryRunner<string, string>({
       mode: "SHADOW",
-      baseline: (q) => `v1:${q}`,
-      candidate: (q) => `v1:${q}`,
-      scorer: (_i, b, c) => (b === c ? 1.0 : 0.0),
+      baseline: async (q) => `v1:${q}`,
+      candidate: async (q) => `v1:${q}`,
+      scorer: async (_i, b, c) => (b === c ? 1.0 : 0.0),
       policy: { minSamples: 1 },
     });
     const sOut = await shadow.executeAsync({
       requestId: "as-1",
       requestInput: "ping",
-      asyncBaseline: async (q) => `v1:${q}`,
-      asyncCandidate: async (q) => `v1:${q}`,
     });
     equal(sOut.response, "v1:ping");
     equal(shadow.evaluatePromotion().decision, "PROMOTE");
+
+    const nullableShadow = new ShadowCanaryRunner<string, string | null>({
+      mode: "SHADOW",
+      baseline: async () => null,
+      candidate: async () => null,
+      scorer: (_i, b, c) => (b === null && c === null ? 1.0 : 0.0),
+      policy: { minSamples: 1 },
+    });
+    const nullOut = await nullableShadow.executeAsync({
+      requestId: "as-null",
+      requestInput: "none",
+    });
+    equal(nullOut.response, null);
+    equal(nullOut.sample.qualityScore, 1.0);
+    equal(nullableShadow.evaluatePromotion().decision, "PROMOTE");
+  });
+});
+
+describe("Compiled dist/ ESM & Declaration Smoke Suite", () => {
+  it("loads compiled dist/index.js cleanly with rewritten .js declaration specifiers", async () => {
+    const distRouter = new DistIntentRouter({
+      rules: [{ intent: "ops", keywords: ["/deploy"] }],
+    });
+    equal(distRouter.route("/deploy api").intent, "ops");
+
+    const distShadow = new DistShadowCanaryRunner<string, string>({
+      mode: "SHADOW",
+      baseline: async (x) => `dist:${x}`,
+      candidate: async (x) => `dist:${x}`,
+      scorer: (_i, b, c) => (b === c ? 1.0 : 0.0),
+      policy: { minSamples: 1 },
+    });
+    const out = await distShadow.executeAsync({
+      requestId: "dist-1",
+      requestInput: "ok",
+    });
+    equal(out.response, "dist:ok");
   });
 });

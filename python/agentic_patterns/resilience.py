@@ -21,7 +21,7 @@ import re
 import secrets
 import time
 import unicodedata
-from typing import Awaitable, Callable, Generic, Mapping, Sequence, TypeVar
+from typing import Awaitable, Callable, Generic, Mapping, Sequence, TypeVar, cast
 
 from .coordination import canonical_json, sha256_hex
 
@@ -1769,9 +1769,9 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
         self,
         *,
         mode: RolloutMode,
-        baseline: Callable[[TIn], TOut],
-        candidate: Callable[[TIn], TOut],
-        scorer: Callable[[TIn, TOut | None, TOut], float],
+        baseline: Callable[[TIn], TOut | Awaitable[TOut]],
+        candidate: Callable[[TIn], TOut | Awaitable[TOut]],
+        scorer: Callable[[TIn, TOut | None, TOut], float | Awaitable[float]],
         policy: PromotionPolicy | None = None,
         clock: Callable[[], int] | None = None,
     ) -> None:
@@ -1830,8 +1830,9 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
         request_input: TIn,
     ) -> RolloutExecutionResult[TOut]:
         b_start = self._clock()
-        baseline_out = self._baseline(request_input)
-        _reject_coroutine(baseline_out, "execute", "execute_async")
+        raw_baseline_out = self._baseline(request_input)
+        _reject_coroutine(raw_baseline_out, "execute", "execute_async")
+        baseline_out = cast(TOut, raw_baseline_out)
         b_latency = max(1, self._clock() - b_start)
 
         c_start = self._clock()
@@ -1841,12 +1842,13 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
         async_misuse: TypeError | None = None
 
         try:
-            candidate_out = self._candidate(request_input)
+            raw_candidate_out = self._candidate(request_input)
             try:
-                _reject_coroutine(candidate_out, "execute", "execute_async")
+                _reject_coroutine(raw_candidate_out, "execute", "execute_async")
             except TypeError as misuse_exc:
                 async_misuse = misuse_exc
             else:
+                candidate_out = cast(TOut, raw_candidate_out)
                 c_latency = max(1, self._clock() - c_start)
                 raw_score = self._scorer(request_input, baseline_out, candidate_out)
                 try:
@@ -1854,7 +1856,7 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
                 except TypeError as misuse_exc:
                     async_misuse = misuse_exc
                 else:
-                    score = self._validate_score(raw_score)
+                    score = self._validate_score(cast(float, raw_score))
         except Exception:
             c_latency = max(1, self._clock() - c_start)
             c_errored = True
@@ -1888,14 +1890,14 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
             b_start = self._clock()
             maybe_b = self._baseline(request_input)
             out_b = await maybe_b if inspect.isawaitable(maybe_b) else maybe_b
-            return out_b, max(1, self._clock() - b_start)
+            return cast(TOut, out_b), max(1, self._clock() - b_start)
 
         async def _run_cand() -> tuple[TOut | None, int, bool]:
             c_start = self._clock()
             try:
                 maybe_c = self._candidate(request_input)
                 out_c = await maybe_c if inspect.isawaitable(maybe_c) else maybe_c
-                return out_c, max(1, self._clock() - c_start), False
+                return cast(TOut, out_c), max(1, self._clock() - c_start), False
             except Exception:
                 return None, max(1, self._clock() - c_start), True
 
@@ -1904,15 +1906,17 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
         )
 
         score = 0.0
-        if not c_errored and cand_out is not None:
+        if not c_errored:
             try:
-                maybe_score = self._scorer(request_input, baseline_out, cand_out)
+                maybe_score = self._scorer(
+                    request_input, baseline_out, cast(TOut, cand_out)
+                )
                 raw_score = (
                     await maybe_score
                     if inspect.isawaitable(maybe_score)
                     else maybe_score
                 )
-                score = self._validate_score(raw_score)
+                score = self._validate_score(cast(float, raw_score))
             except Exception:
                 c_errored = True
                 score = 0.0
@@ -1947,12 +1951,13 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
             c_start = self._clock()
             async_misuse: TypeError | None = None
             try:
-                candidate_out = self._candidate(request_input)
+                raw_candidate_out = self._candidate(request_input)
                 try:
-                    _reject_coroutine(candidate_out, "execute", "execute_async")
+                    _reject_coroutine(raw_candidate_out, "execute", "execute_async")
                 except TypeError as misuse_exc:
                     async_misuse = misuse_exc
                 else:
+                    candidate_out = cast(TOut, raw_candidate_out)
                     c_latency = max(1, self._clock() - c_start)
                     raw_score = self._scorer(request_input, None, candidate_out)
                     try:
@@ -1960,7 +1965,7 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
                     except TypeError as misuse_exc:
                         async_misuse = misuse_exc
                     else:
-                        score = self._validate_score(raw_score)
+                        score = self._validate_score(cast(float, raw_score))
                         sample = ComparisonSample(
                             request_id=request_id,
                             mode=RolloutMode.CANARY,
@@ -1979,8 +1984,9 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
             except Exception:
                 c_latency = max(1, self._clock() - c_start)
                 b_start = self._clock()
-                fallback_out = self._baseline(request_input)
-                _reject_coroutine(fallback_out, "execute", "execute_async")
+                raw_fallback_out = self._baseline(request_input)
+                _reject_coroutine(raw_fallback_out, "execute", "execute_async")
+                fallback_out = cast(TOut, raw_fallback_out)
                 b_latency = max(1, self._clock() - b_start)
                 sample = ComparisonSample(
                     request_id=request_id,
@@ -2002,8 +2008,9 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
                 raise async_misuse
 
         b_start = self._clock()
-        baseline_out = self._baseline(request_input)
-        _reject_coroutine(baseline_out, "execute", "execute_async")
+        raw_baseline_out = self._baseline(request_input)
+        _reject_coroutine(raw_baseline_out, "execute", "execute_async")
+        baseline_out = cast(TOut, raw_baseline_out)
         b_latency = max(1, self._clock() - b_start)
         sample = ComparisonSample(
             request_id=request_id,
@@ -2035,13 +2042,15 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
             c_start = self._clock()
             try:
                 maybe_c = self._candidate(request_input)
-                candidate_out = (
-                    await maybe_c if inspect.isawaitable(maybe_c) else maybe_c
+                candidate_out = cast(
+                    TOut,
+                    await maybe_c if inspect.isawaitable(maybe_c) else maybe_c,
                 )
                 c_latency = max(1, self._clock() - c_start)
                 maybe_s = self._scorer(request_input, None, candidate_out)
-                raw_score = (
-                    await maybe_s if inspect.isawaitable(maybe_s) else maybe_s
+                raw_score = cast(
+                    float,
+                    await maybe_s if inspect.isawaitable(maybe_s) else maybe_s,
                 )
                 score = self._validate_score(raw_score)
                 sample = ComparisonSample(
@@ -2063,8 +2072,9 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
                 c_latency = max(1, self._clock() - c_start)
                 b_start = self._clock()
                 maybe_b = self._baseline(request_input)
-                fallback_out = (
-                    await maybe_b if inspect.isawaitable(maybe_b) else maybe_b
+                fallback_out = cast(
+                    TOut,
+                    await maybe_b if inspect.isawaitable(maybe_b) else maybe_b,
                 )
                 b_latency = max(1, self._clock() - b_start)
                 sample = ComparisonSample(
@@ -2085,7 +2095,10 @@ class ShadowCanaryRunner(Generic[TIn, TOut]):
 
         b_start = self._clock()
         maybe_b = self._baseline(request_input)
-        baseline_out = await maybe_b if inspect.isawaitable(maybe_b) else maybe_b
+        baseline_out = cast(
+            TOut,
+            await maybe_b if inspect.isawaitable(maybe_b) else maybe_b,
+        )
         b_latency = max(1, self._clock() - b_start)
         sample = ComparisonSample(
             request_id=request_id,

@@ -28,6 +28,10 @@ function rejectPromiseLike(value, syncMethod, asyncMethod) {
         throw new TypeError(`Promise returned to synchronous ${syncMethod}(); use ${asyncMethod}() instead.`);
     }
 }
+function ensureSyncValue(value, syncMethod, asyncMethod) {
+    rejectPromiseLike(value, syncMethod, asyncMethod);
+    return value;
+}
 function createAbortController() {
     const g = globalThis;
     if (typeof g.AbortController === "function") {
@@ -1405,12 +1409,9 @@ export class ShadowCanaryRunner {
         return this.executeCanary(params.requestId, params.requestInput);
     }
     async executeAsync(params) {
-        const baseFn = params.asyncBaseline ??
-            ((inp) => this.baseline(inp));
-        const candFn = params.asyncCandidate ??
-            ((inp) => this.candidate(inp));
-        const scoreFn = params.asyncScorer ??
-            ((inp, bOut, cOut) => this.scorer(inp, bOut, cOut));
+        const baseFn = params.asyncBaseline ?? this.baseline;
+        const candFn = params.asyncCandidate ?? this.candidate;
+        const scoreFn = params.asyncScorer ?? this.scorer;
         if (this.mode === "SHADOW") {
             return await this.executeShadowAsync(params.requestId, params.requestInput, baseFn, candFn, scoreFn);
         }
@@ -1418,8 +1419,7 @@ export class ShadowCanaryRunner {
     }
     executeShadow(requestId, requestInput) {
         const bStart = this.clock();
-        const baselineOut = this.baseline(requestInput);
-        rejectPromiseLike(baselineOut, "execute", "executeAsync");
+        const baselineOut = ensureSyncValue(this.baseline(requestInput), "execute", "executeAsync");
         const bLatency = Math.max(1, this.clock() - bStart);
         const cStart = this.clock();
         let cErrored = false;
@@ -1427,18 +1427,20 @@ export class ShadowCanaryRunner {
         let score = 0;
         let asyncMisuse = null;
         try {
-            const candidateOut = this.candidate(requestInput);
+            const maybeCand = this.candidate(requestInput);
+            let candidateOut = undefined;
             try {
-                rejectPromiseLike(candidateOut, "execute", "executeAsync");
+                candidateOut = ensureSyncValue(maybeCand, "execute", "executeAsync");
             }
             catch (misuseErr) {
                 asyncMisuse = misuseErr;
             }
             if (asyncMisuse === null) {
                 cLatency = Math.max(1, this.clock() - cStart);
-                const rawScore = this.scorer(requestInput, baselineOut, candidateOut);
+                const maybeScore = this.scorer(requestInput, baselineOut, candidateOut);
+                let rawScore = 0;
                 try {
-                    rejectPromiseLike(rawScore, "execute", "executeAsync");
+                    rawScore = ensureSyncValue(maybeScore, "execute", "executeAsync");
                 }
                 catch (misuseErr) {
                     asyncMisuse = misuseErr;
@@ -1482,16 +1484,23 @@ export class ShadowCanaryRunner {
             const cStart = this.clock();
             try {
                 const out = await candFn(requestInput);
-                return { out, lat: Math.max(1, this.clock() - cStart), errored: false };
+                return {
+                    errored: false,
+                    out,
+                    lat: Math.max(1, this.clock() - cStart),
+                };
             }
             catch {
-                return { out: null, lat: Math.max(1, this.clock() - cStart), errored: true };
+                return {
+                    errored: true,
+                    lat: Math.max(1, this.clock() - cStart),
+                };
             }
         };
         const [baseRes, candRes] = await Promise.all([runBase(), runCand()]);
         let cErrored = candRes.errored;
         let score = 0;
-        if (!cErrored && candRes.out !== null) {
+        if (!candRes.errored) {
             try {
                 const rawScore = await scoreFn(requestInput, baseRes.out, candRes.out);
                 score = ShadowCanaryRunner.validateScore(rawScore);
@@ -1524,18 +1533,20 @@ export class ShadowCanaryRunner {
             const cStart = this.clock();
             let asyncMisuse = null;
             try {
-                const candidateOut = this.candidate(requestInput);
+                const maybeCand = this.candidate(requestInput);
+                let candidateOut = undefined;
                 try {
-                    rejectPromiseLike(candidateOut, "execute", "executeAsync");
+                    candidateOut = ensureSyncValue(maybeCand, "execute", "executeAsync");
                 }
                 catch (misuseErr) {
                     asyncMisuse = misuseErr;
                 }
                 if (asyncMisuse === null) {
                     const cLatency = Math.max(1, this.clock() - cStart);
-                    const rawScore = this.scorer(requestInput, null, candidateOut);
+                    const maybeScore = this.scorer(requestInput, null, candidateOut);
+                    let rawScore = 0;
                     try {
-                        rejectPromiseLike(rawScore, "execute", "executeAsync");
+                        rawScore = ensureSyncValue(maybeScore, "execute", "executeAsync");
                     }
                     catch (misuseErr) {
                         asyncMisuse = misuseErr;
@@ -1563,8 +1574,7 @@ export class ShadowCanaryRunner {
             catch {
                 const cLatency = Math.max(1, this.clock() - cStart);
                 const bStart = this.clock();
-                const fallbackOut = this.baseline(requestInput);
-                rejectPromiseLike(fallbackOut, "execute", "executeAsync");
+                const fallbackOut = ensureSyncValue(this.baseline(requestInput), "execute", "executeAsync");
                 const bLatency = Math.max(1, this.clock() - bStart);
                 const sample = {
                     requestId,
@@ -1587,8 +1597,7 @@ export class ShadowCanaryRunner {
             }
         }
         const bStart = this.clock();
-        const baselineOut = this.baseline(requestInput);
-        rejectPromiseLike(baselineOut, "execute", "executeAsync");
+        const baselineOut = ensureSyncValue(this.baseline(requestInput), "execute", "executeAsync");
         const bLatency = Math.max(1, this.clock() - bStart);
         const sample = {
             requestId,

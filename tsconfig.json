@@ -23,5 +23,5 @@
     "tests/typescript/**/*.ts",
     "tests/typescript/**/*.d.ts"
   ],
-  "exclude": ["dist", "node_modules"]
+  "exclude": ["node_modules"]
 }

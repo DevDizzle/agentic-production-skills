@@ -337,9 +337,9 @@ export declare class ShadowCanaryRunner<TIn, TOut> {
     private rolledBack;
     constructor(params: {
         readonly mode: RolloutMode;
-        readonly baseline: (input: TIn) => TOut;
-        readonly candidate: (input: TIn) => TOut;
-        readonly scorer: (input: TIn, baselineOutput: TOut | null, candidateOutput: TOut) => number;
+        readonly baseline: (input: TIn) => TOut | Promise<TOut>;
+        readonly candidate: (input: TIn) => TOut | Promise<TOut>;
+        readonly scorer: (input: TIn, baselineOutput: TOut | null, candidateOutput: TOut) => number | Promise<number>;
         readonly policy?: PromotionPolicy;
         readonly clock?: () => number;
     });
@@ -351,13 +351,13 @@ export declare class ShadowCanaryRunner<TIn, TOut> {
         readonly requestId: string;
         readonly requestInput: TIn;
     }): RolloutExecutionResult<TOut>;
-    executeAsync<TResolved = Awaited<TOut>>(params: {
+    executeAsync(params: {
         readonly requestId: string;
         readonly requestInput: TIn;
-        readonly asyncBaseline?: (input: TIn) => Promise<TResolved> | TResolved;
-        readonly asyncCandidate?: (input: TIn) => Promise<TResolved> | TResolved;
-        readonly asyncScorer?: (input: TIn, baselineOutput: TResolved | null, candidateOutput: TResolved) => Promise<number> | number;
-    }): Promise<RolloutExecutionResult<TResolved>>;
+        readonly asyncBaseline?: (input: TIn) => Promise<TOut> | TOut;
+        readonly asyncCandidate?: (input: TIn) => Promise<TOut> | TOut;
+        readonly asyncScorer?: (input: TIn, baselineOutput: TOut | null, candidateOutput: TOut) => Promise<number> | number;
+    }): Promise<RolloutExecutionResult<TOut>>;
     private executeShadow;
     private executeShadowAsync;
     private executeCanary;

@@ -51,6 +51,7 @@ Reference implementations live in [`python/agentic_patterns/resilience.py`](../.
 ### Python Reference Usage
 
 ```python
+import asyncio
 from agentic_patterns.resilience import (
     PromotionPolicy,
     RolloutMode,
@@ -75,6 +76,10 @@ runner = ShadowCanaryRunner(
 res = runner.execute(request_id="req-9001", request_input="Invoice discrepancy")
 assert res.served_variant == "baseline"
 
+# Async callers run baseline and isolated candidate concurrently via execute_async()
+async_res = asyncio.run(
+    runner.execute_async(request_id="req-9002", request_input="Refund status")
+)
 report = runner.evaluate_promotion()
 # report.decision is PromotionDecision.HOLD_COLLECT_MORE until min_samples=50
 ```
@@ -106,6 +111,10 @@ const runner = new ShadowCanaryRunner<string, AgentOutput>({
 const out = runner.execute({
   requestId: "tenant-42:session-9",
   requestInput: "Invoice discrepancy",
+});
+const asyncOut = await runner.executeAsync({
+  requestId: "tenant-42:session-10",
+  requestInput: "Refund status",
 });
 const report = runner.evaluatePromotion();
 ```
